@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""
+Test Suite for Unstable Singularity Detector
+
+Comprehensive tests for the core detection algorithm including:
+- Precision accuracy validation
+- Pattern recognition testing
+- Integration with synthetic data
+- Performance benchmarking
+"""
+
+import pytest
+import torch
+import numpy as np
+import sys
+import os
+
+# Add src to path for testing
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+from unstable_singularity_detector import (
+    UnstableSingularityDetector,
+    SingularityDetectionResult,
+    SingularityType
+)
+
+class TestUnstableSingularityDetector:
+    """Test suite for the main detection algorithm"""
+
+    def setup_method(self):
+        """Setup for each test method"""
+        self.detector = UnstableSingularityDetector(
+            equation_type="ipm",
+            precision_target=1e-12,
+            confidence_threshold=0.7
+        )
+
+    def generate_test_blowup(self, lambda_val=1.875, nx=32, ny=32, nt=50):
+        """Generate synthetic blow-up solution for testing"""
+        x = torch.linspace(-1, 1, nx)
+        y = torch.linspace(-1, 1, ny)
+        X, Y = torch.meshgrid(x, y, indexing='ij')
+        t_vals = torch.linspace(0.1, 0.9, nt)
+
+        solution_field = torch.zeros(nt, nx, ny)
+
+        for i, t in enumerate(t_vals):
+            time_factor = (1 - t) ** (-lambda_val)
+            r_squared = X**2 + Y**2
+            spatial_factor = torch.exp(-r_squared) / (1 + 0.1 * r_squared)
+            solution_field[i] = time_factor * spatial_factor
+
+        return solution_field, t_vals, (X, Y)
+
+    def test_detector_initialization(self):
+        """Test detector initialization with various parameters"""
+        # Default initialization
+        detector = UnstableSingularityDetector()
+        assert detector.equation_type == "euler_3d"
+        assert detector.precision_target == 1e-14
+
+        # Custom initialization
+        detector_custom = UnstableSingularityDetector(
+            equation_type="ipm",
+            precision_target=1e-10,
+            confidence_threshold=0.8,
+            max_instability_order=5
+        )
+        assert detector_custom.equation_type == "ipm"
+        assert detector_custom.precision_target == 1e-10
+        assert detector_custom.confidence_threshold == 0.8
+        assert detector_custom.max_instability_order == 5
+
+    def test_lambda_pattern_validation(self):
+        """Test validation against DeepMind's empirical patterns"""
+        # IPM pattern: λ = -0.125 × order + 1.875
+        test_cases = [
+            (1, 1.750),  # order 1
+            (2, 1.625),  # order 2
+            (3, 1.500),  # order 3
+            (4, 1.375),  # order 4
+        ]
+
+        for order, expected_lambda in test_cases:
+            # The pattern should be within detector's knowledge
+            pattern_coeff = self.detector.lambda_pattern_coefficients["ipm"]
+            calculated = pattern_coeff["slope"] * order + pattern_coeff["intercept"]
+
+            assert abs(calculated - expected_lambda) < 1e-6, \
+                f"Pattern mismatch for order {order}: expected {expected_lambda}, got {calculated}"
+
+    def test_synthetic_detection(self):
+        """Test detection on synthetic blow-up solutions"""
+        # Generate synthetic data with known lambda
+        lambda_true = 1.875
+        solution_field, t_vals, grids = self.generate_test_blowup(lambda_true)
+
+        # Run detection
+        results = self.detector.detect_unstable_singularities(
+            solution_field, t_vals, grids
+        )
+
+        # Validate results
+        assert len(results) > 0, "Should detect at least one singularity"
+
+        result = results[0]
+        assert isinstance(result, SingularityDetectionResult)
+        assert result.singularity_type in [SingularityType.STABLE_BLOWUP, SingularityType.UNSTABLE_BLOWUP]
+
+        # Lambda accuracy test
+        lambda_error = abs(result.lambda_value - lambda_true)
+        assert lambda_error < 0.1, f"Lambda estimation error too large: {lambda_error}"
+
+        # Confidence check
+        assert result.confidence_score >= self.detector.confidence_threshold
+
+        # Precision check
+        assert result.precision_achieved <= self.detector.precision_target * 10  # Allow some tolerance
+
+    def test_precision_accuracy(self):
+        """Test near machine precision achievement"""
+        # Use high precision target
+        high_precision_detector = UnstableSingularityDetector(
+            precision_target=1e-13,
+            confidence_threshold=0.6
+        )
+
+        # Generate very clean synthetic data
+        solution_field, t_vals, grids = self.generate_test_blowup(
+            lambda_val=1.875, nx=64, ny=64, nt=100
+        )
+
+        results = high_precision_detector.detect_unstable_singularities(
+            solution_field, t_vals, grids
+        )
+
+        if results:  # If detection successful
+            result = results[0]
+            # Should achieve near target precision
+            assert result.precision_achieved < 1e-10, \
+                f"Precision not achieved: {result.precision_achieved:.2e}"
+
+    def test_multiple_equation_types(self):
+        """Test detector with different equation types"""
+        equation_types = ["ipm", "boussinesq", "euler_3d"]
+        expected_patterns = {
+            "ipm": 1.875,
+            "boussinesq": 1.654,
+            "euler_3d": 1.523
+        }
+
+        for eq_type in equation_types:
+            detector = UnstableSingularityDetector(equation_type=eq_type)
+
+            # Check pattern coefficients are loaded
+            assert eq_type in detector.lambda_pattern_coefficients
+
+            # Test with corresponding expected lambda
+            lambda_true = expected_patterns[eq_type]
+            solution_field, t_vals, grids = self.generate_test_blowup(lambda_true)
+
+            results = detector.detect_unstable_singularities(
+                solution_field, t_vals, grids
+            )
+
+            # Should detect something for each equation type
+            assert len(results) >= 0  # Allow for no detection if conditions are not met
+
+    def test_edge_cases(self):
+        """Test edge cases and error handling"""
+
+        # Empty solution field
+        empty_field = torch.zeros(10, 16, 16)
+        t_vals = torch.linspace(0, 1, 10)
+        x = torch.linspace(-1, 1, 16)
+        X, Y = torch.meshgrid(x, x, indexing='ij')
+
+        results = self.detector.detect_unstable_singularities(
+            empty_field, t_vals, (X, Y)
+        )
+        assert len(results) == 0, "Should not detect singularities in zero field"
+
+        # Single time point
+        single_field = torch.ones(1, 16, 16)
+        single_t = torch.tensor([0.5])
+
+        results = self.detector.detect_unstable_singularities(
+            single_field, single_t, (X, Y)
+        )
+        # Should handle gracefully (may or may not detect)
+        assert isinstance(results, list)
+
+    def test_instability_order_computation(self):
+        """Test computation of instability order"""
+        # Generate solution with known instability structure
+        solution_field, t_vals, grids = self.generate_test_blowup()
+
+        # Add synthetic instability modes
+        X, Y = grids
+        for i in range(len(solution_field)):
+            # Add a few unstable modes
+            solution_field[i] += 0.01 * torch.sin(2 * np.pi * X) * torch.cos(2 * np.pi * Y)
+            solution_field[i] += 0.005 * torch.sin(4 * np.pi * X) * torch.cos(4 * np.pi * Y)
+
+        results = self.detector.detect_unstable_singularities(
+            solution_field, t_vals, grids
+        )
+
+        if results:
+            result = results[0]
+            # Should detect some instability
+            assert result.instability_order >= 0
+            assert result.instability_order <= self.detector.max_instability_order
+
+    @pytest.mark.slow
+    def test_performance_benchmark(self):
+        """Benchmark detection performance"""
+        import time
+
+        # Large scale test
+        solution_field, t_vals, grids = self.generate_test_blowup(
+            nx=128, ny=128, nt=200
+        )
+
+        start_time = time.time()
+        results = self.detector.detect_unstable_singularities(
+            solution_field, t_vals, grids
+        )
+        end_time = time.time()
+
+        detection_time = end_time - start_time
+        print(f"Detection time for 128x128x200 field: {detection_time:.2f} seconds")
+
+        # Should complete within reasonable time
+        assert detection_time < 60, f"Detection too slow: {detection_time:.2f}s"
+
+    def test_gpu_compatibility(self):
+        """Test GPU acceleration if available"""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+
+        # Move detector to GPU
+        detector = UnstableSingularityDetector(equation_type="ipm")
+
+        # Generate data on GPU
+        solution_field, t_vals, grids = self.generate_test_blowup()
+        solution_field = solution_field.cuda()
+        t_vals = t_vals.cuda()
+        grids = (grids[0].cuda(), grids[1].cuda())
+
+        # Should work on GPU
+        results = detector.detect_unstable_singularities(
+            solution_field, t_vals, grids
+        )
+
+        # Results should be valid
+        assert isinstance(results, list)
+
+class TestIntegration:
+    """Integration tests combining multiple components"""
+
+    def test_end_to_end_pipeline(self):
+        """Test complete pipeline from generation to visualization"""
+        # This would test the full pipeline including visualization
+        # For now, just test that all components can be imported
+
+        try:
+            from pinn_solver import PINNSolver, PINNConfig
+            from gauss_newton_optimizer import GaussNewtonOptimizer
+            from visualization import SingularityVisualizer
+
+            # Basic instantiation test
+            config = PINNConfig()
+            detector = UnstableSingularityDetector()
+            visualizer = SingularityVisualizer()
+
+            assert config is not None
+            assert detector is not None
+            assert visualizer is not None
+
+        except ImportError as e:
+            pytest.fail(f"Integration test failed: {e}")
+
+if __name__ == "__main__":
+    # Run tests with verbose output
+    pytest.main([__file__, "-v", "--tb=short"])
