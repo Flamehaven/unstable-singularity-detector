@@ -1,0 +1,343 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # Code quality checks
+  code-quality:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.8, 3.9, "3.10", "3.11"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -e .
+
+    - name: Code formatting check (Black)
+      run: |
+        black --check --diff src/ tests/ examples/
+
+    - name: Linting (Flake8)
+      run: |
+        flake8 src/ tests/ examples/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 src/ tests/ examples/ --count --exit-zero --max-complexity=10 --max-line-length=88 --statistics
+
+    - name: Type checking (MyPy)
+      run: |
+        mypy src/ --ignore-missing-imports --no-strict-optional
+      continue-on-error: true  # Type checking issues shouldn't fail CI
+
+  # Unit tests
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: [3.8, 3.9, "3.10", "3.11"]
+        exclude:
+          # Exclude some combinations to reduce CI time
+          - os: macos-latest
+            python-version: 3.8
+          - os: windows-latest
+            python-version: 3.8
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install system dependencies (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libhdf5-dev
+
+    - name: Install system dependencies (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install hdf5
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/pip
+          ~/AppData/Local/pip/Cache
+          ~/Library/Caches/pip
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-${{ matrix.python-version }}-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -e ".[dev]"
+
+    - name: Run unit tests
+      run: |
+        pytest tests/ -v --tb=short --cov=src --cov-report=xml --cov-report=term-missing
+
+    - name: Upload coverage to Codecov
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.9'
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+
+  # GPU tests (only on Linux with CUDA)
+  gpu-tests:
+    runs-on: ubuntu-latest
+    container:
+      image: pytorch/pytorch:2.0.1-cuda11.7-cudnn8-devel
+      options: --gpus all
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install system dependencies
+      run: |
+        apt-get update
+        apt-get install -y git libhdf5-dev
+
+    - name: Install Python dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install -e ".[dev]"
+
+    - name: Run GPU tests
+      run: |
+        pytest tests/ -v -m "gpu" --tb=short
+      continue-on-error: true  # GPU tests can be flaky
+
+  # Integration tests
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs: [code-quality, test]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.9
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -e ".[dev]"
+
+    - name: Run integration tests
+      run: |
+        pytest tests/ -v -m "integration" --tb=short
+      timeout-minutes: 30
+
+    - name: Test CLI commands
+      run: |
+        python -m src.cli info
+        python -m src.cli config list
+        python -m src.cli config validate base
+      timeout-minutes: 10
+
+  # Performance benchmarks
+  benchmarks:
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.9
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -e ".[dev]"
+
+    - name: Run benchmarks
+      run: |
+        pytest tests/ -v -m "benchmark" --tb=short --benchmark-only --benchmark-json=benchmark.json
+      continue-on-error: true
+
+    - name: Store benchmark results
+      uses: benchmark-action/github-action-benchmark@v1
+      if: github.ref == 'refs/heads/main'
+      with:
+        tool: 'pytest'
+        output-file-path: benchmark.json
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        auto-push: true
+
+  # Documentation tests
+  docs:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.9
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -e ".[docs]"
+
+    - name: Build documentation
+      run: |
+        # This would build Sphinx documentation
+        echo "Documentation build would go here"
+      continue-on-error: true
+
+    - name: Test example scripts
+      run: |
+        python examples/basic_detection_demo.py --test-mode
+        python examples/pinn_training_example.py --epochs 10 --equation ipm
+      timeout-minutes: 15
+
+  # Security scanning
+  security:
+    runs-on: ubuntu-latest
+    needs: [code-quality]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.9
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install safety bandit[toml]
+
+    - name: Run safety check
+      run: |
+        safety check --json
+      continue-on-error: true
+
+    - name: Run bandit security linter
+      run: |
+        bandit -r src/ -f json -o bandit-report.json
+      continue-on-error: true
+
+    - name: Upload security scan results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-scan-results
+        path: |
+          bandit-report.json
+          safety-report.json
+
+  # Build and test package
+  build:
+    runs-on: ubuntu-latest
+    needs: [test]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.9
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.9
+
+    - name: Install build dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build twine
+
+    - name: Build package
+      run: |
+        python -m build
+
+    - name: Check package
+      run: |
+        twine check dist/*
+
+    - name: Test package installation
+      run: |
+        pip install dist/*.whl
+        python -c "import src; print('Package installed successfully')"
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: dist
+        path: dist/
+
+  # Deployment (only on main branch)
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build, integration-tests]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: dist
+        path: dist/
+
+    - name: Prepare deployment
+      run: |
+        echo "Deployment preparation complete"
+        ls -la dist/
+
+    # Uncomment for actual PyPI deployment
+    # - name: Publish to PyPI
+    #   uses: pypa/gh-action-pypi-publish@release/v1
+    #   with:
+    #     password: ${{ secrets.PYPI_API_TOKEN }}
+
+# Notification on failure
+  notify:
+    runs-on: ubuntu-latest
+    needs: [code-quality, test, integration-tests]
+    if: failure()
+
+    steps:
+    - name: Notify on failure
+      run: |
+        echo "CI pipeline failed. Check the logs for details."
+        # Add notification logic (Slack, email, etc.) if needed

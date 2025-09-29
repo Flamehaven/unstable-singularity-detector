@@ -1,0 +1,68 @@
+# 3D Euler simulation configuration
+# High-fidelity fluid dynamics with singularity monitoring
+
+_target_: src.fluid_dynamics_sim.SimulationConfig
+
+# Grid parameters
+grid:
+  nx: 128
+  ny: 128
+  nz: 64
+  Lx: 4.0
+  Ly: 4.0
+  Lz: 2.0
+
+# Time integration
+time:
+  dt: 1.0e-4
+  t_final: 1.0
+  cfl_number: 0.5
+  adaptive_dt: true
+  max_dt: 1.0e-3
+  min_dt: 1.0e-6
+
+# Physical parameters
+physics:
+  equation_type: "euler_3d"
+  viscosity: 0.0  # Inviscid Euler equations
+  density: 1.0
+  pressure_scale: 1.0
+
+# Initial conditions
+initial_conditions:
+  type: "taylor_green_vortex"
+  reynolds_number: 1600
+  perturbation_amplitude: 0.01
+  random_perturbations: true
+  perturbation_modes: [1, 2, 3]
+
+# Boundary conditions
+boundary_conditions:
+  type: "periodic"  # periodic, dirichlet, neumann
+
+# Singularity detection
+singularity_detection:
+  enabled: true
+  threshold: 1.0e10
+  gradient_threshold: 1.0e8
+  monitoring_frequency: 10
+  alert_on_detection: true
+
+# Spatial operators
+spatial_operators:
+  method: "spectral"  # spectral, finite_difference
+  dealiasing: true
+  padding_factor: 3/2
+
+# I/O settings
+io:
+  save_frequency: 100
+  output_format: "hdf5"  # hdf5, netcdf, binary
+  compression: "gzip"
+  compression_level: 6
+
+# Performance
+performance:
+  use_gpu: true
+  memory_pool: true
+  async_io: false

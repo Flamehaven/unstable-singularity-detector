@@ -1,0 +1,46 @@
+# Base configuration for Unstable Singularity Detector
+# Based on DeepMind's breakthrough research in fluid dynamics
+
+defaults:
+  - detector: ipm_detector
+  - pinn: high_precision_pinn
+  - simulation: euler_3d_sim
+  - optimizer: gauss_newton
+  - visualization: publication_quality
+
+# Experiment metadata
+experiment:
+  name: "unstable_singularity_detection"
+  version: "1.0.0"
+  author: "Flamehaven Research"
+  description: "DeepMind fluid dynamics singularities implementation"
+  tags: ["fluid-dynamics", "deepmind", "singularities", "pinn"]
+
+# Global settings
+global:
+  precision: float64  # torch.float64 for machine precision
+  device: "auto"  # auto, cpu, cuda
+  random_seed: 42
+  log_level: "INFO"
+  output_dir: "./outputs"
+  checkpoint_dir: "./checkpoints"
+
+# Performance settings
+performance:
+  num_workers: 4
+  pin_memory: true
+  mixed_precision: false  # Keep false for maximum precision
+  compile: false  # PyTorch 2.0 compilation
+
+# Logging configuration
+logging:
+  enable_mlflow: false
+  enable_wandb: false
+  log_every_n_steps: 100
+  save_frequency: 1000
+
+# Reproducibility
+reproducibility:
+  deterministic: true
+  benchmark: false
+  set_torch_deterministic: true

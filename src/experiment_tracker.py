@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""
+Experiment Tracking System
+
+MLflow-based experiment tracking for reproducible research.
+Automatic logging of parameters, metrics, artifacts, and models.
+"""
+
+import os
+import logging
+from typing import Any, Dict, List, Optional, Union
+from pathlib import Path
+import json
+import pickle
+import numpy as np
+import torch
+from datetime import datetime
+import mlflow
+import mlflow.pytorch
+from mlflow.tracking import MlflowClient
+from omegaconf import DictConfig, OmegaConf
+import matplotlib.pyplot as plt
+import h5py
+
+logger = logging.getLogger(__name__)
+
+class ExperimentTracker:
+    """
+    Comprehensive experiment tracking system
+
+    Features:
+    - Automatic parameter and metric logging
+    - Model artifact management
+    - Visualization and plot tracking
+    - Data versioning integration
+    - Experiment comparison and analysis
+    """
+
+    def __init__(self,
+                 experiment_name: str = "unstable_singularity_detection",
+                 tracking_uri: Optional[str] = None,
+                 artifact_location: Optional[str] = None):
+        """
+        Initialize experiment tracker
+
+        Args:
+            experiment_name: Name of the MLflow experiment
+            tracking_uri: MLflow tracking server URI
+            artifact_location: Base location for artifacts
+        """
+        self.experiment_name = experiment_name
+
+        # Set tracking URI
+        if tracking_uri:
+            mlflow.set_tracking_uri(tracking_uri)
+        else:
+            # Use local file-based tracking by default
+            tracking_dir = Path("./mlruns").resolve()
+            tracking_dir.mkdir(exist_ok=True)
+            mlflow.set_tracking_uri(f"file://{tracking_dir}")
+
+        # Set or create experiment
+        try:
+            self.experiment_id = mlflow.create_experiment(
+                experiment_name,
+                artifact_location=artifact_location
+            )
+        except Exception:
+            # Experiment already exists
+            experiment = mlflow.get_experiment_by_name(experiment_name)
+            self.experiment_id = experiment.experiment_id
+
+        self.client = MlflowClient()
+        self.active_run = None
+
+        logger.info(f"Initialized experiment tracker: {experiment_name}")
+        logger.info(f"Experiment ID: {self.experiment_id}")
+        logger.info(f"Tracking URI: {mlflow.get_tracking_uri()}")
+
+    def start_run(self,
+                  run_name: Optional[str] = None,
+                  tags: Optional[Dict[str, str]] = None,
+                  nested: bool = False) -> str:
+        """Start a new MLflow run
+
+        Args:
+            run_name: Name for the run
+            tags: Dictionary of tags to apply
+            nested: Whether this is a nested run
+
+        Returns:
+            Run ID
+        """
+        if tags is None:
+            tags = {}
+
+        # Add default tags
+        default_tags = {
+            "mlflow.runName": run_name or f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "project": "unstable-singularity-detector",
+            "version": "1.0.0"
+        }
+        tags.update(default_tags)
+
+        self.active_run = mlflow.start_run(
+            experiment_id=self.experiment_id,
+            run_name=run_name,
+            tags=tags,
+            nested=nested
+        )
+
+        run_id = self.active_run.info.run_id
+        logger.info(f"Started MLflow run: {run_id}")
+
+        return run_id
+
+    def end_run(self):
+        """End the current MLflow run"""
+        if self.active_run:
+            mlflow.end_run()
+            logger.info(f"Ended MLflow run: {self.active_run.info.run_id}")
+            self.active_run = None
+
+    def log_config(self, config: Union[DictConfig, Dict[str, Any]], prefix: str = ""):
+        """Log configuration parameters
+
+        Args:
+            config: Configuration object or dictionary
+            prefix: Prefix for parameter names
+        """
+        if isinstance(config, DictConfig):
+            config = OmegaConf.to_container(config, resolve=True)
+
+        def flatten_dict(d, parent_key='', sep='.'):
+            """Flatten nested dictionary"""
+            items = []
+            for k, v in d.items():
+                new_key = f"{parent_key}{sep}{k}" if parent_key else k
+                if isinstance(v, dict):
+                    items.extend(flatten_dict(v, new_key, sep=sep).items())
+                else:
+                    items.append((new_key, v))
+            return dict(items)
+
+        # Flatten and log parameters
+        flat_config = flatten_dict(config)
+
+        for key, value in flat_config.items():
+            param_name = f"{prefix}.{key}" if prefix else key
+            try:
+                # Convert to string if not a basic type
+                if not isinstance(value, (str, int, float, bool)):
+                    value = str(value)
+                mlflow.log_param(param_name, value)
+            except Exception as e:
+                logger.warning(f"Failed to log parameter {param_name}: {e}")
+
+        logger.info(f"Logged {len(flat_config)} configuration parameters")
+
+    def log_metrics(self, metrics: Dict[str, float], step: Optional[int] = None):
+        """Log metrics with optional step
+
+        Args:
+            metrics: Dictionary of metric name -> value
+            step: Step number for the metrics
+        """
+        for name, value in metrics.items():
+            try:
+                mlflow.log_metric(name, value, step=step)
+            except Exception as e:
+                logger.warning(f"Failed to log metric {name}: {e}")
+
+    def log_training_metrics(self,
+                           epoch: int,
+                           loss_dict: Dict[str, float],
+                           additional_metrics: Optional[Dict[str, float]] = None):
+        """Log training metrics for a specific epoch
+
+        Args:
+            epoch: Current epoch number
+            loss_dict: Dictionary of loss components
+            additional_metrics: Additional metrics to log
+        """
+        all_metrics = loss_dict.copy()
+        if additional_metrics:
+            all_metrics.update(additional_metrics)
+
+        self.log_metrics(all_metrics, step=epoch)
+
+    def log_model(self,
+                  model: torch.nn.Module,
+                  artifact_path: str = "model",
+                  model_name: Optional[str] = None,
+                  signature=None):
+        """Log PyTorch model
+
+        Args:
+            model: PyTorch model to log
+            artifact_path: Path within the run's artifact directory
+            model_name: Registered model name
+            signature: Model signature
+        """
+        try:
+            mlflow.pytorch.log_model(
+                model,
+                artifact_path,
+                registered_model_name=model_name,
+                signature=signature
+            )
+            logger.info(f"Logged model to artifact path: {artifact_path}")
+        except Exception as e:
+            logger.error(f"Failed to log model: {e}")
+
+    def log_figure(self,
+                   figure: plt.Figure,
+                   filename: str,
+                   artifact_path: str = "figures"):
+        """Log matplotlib figure
+
+        Args:
+            figure: Matplotlib figure
+            filename: Filename for the figure
+            artifact_path: Artifact directory path
+        """
+        try:
+            # Create temporary directory
+            temp_dir = Path("./temp_artifacts")
+            temp_dir.mkdir(exist_ok=True)
+
+            fig_path = temp_dir / filename
+            figure.savefig(fig_path, dpi=300, bbox_inches='tight')
+
+            mlflow.log_artifact(str(fig_path), artifact_path)
+
+            # Cleanup
+            fig_path.unlink()
+
+            logger.info(f"Logged figure: {filename}")
+        except Exception as e:
+            logger.error(f"Failed to log figure {filename}: {e}")
+
+    def log_data_artifact(self,
+                         data: Union[np.ndarray, torch.Tensor, Dict],
+                         filename: str,
+                         artifact_path: str = "data",
+                         format: str = "auto"):
+        """Log data artifacts
+
+        Args:
+            data: Data to save (numpy array, tensor, or dict)
+            filename: Filename for the artifact
+            artifact_path: Artifact directory path
+            format: Data format (auto, hdf5, pickle, numpy)
+        """
+        try:
+            temp_dir = Path("./temp_artifacts")
+            temp_dir.mkdir(exist_ok=True)
+
+            file_path = temp_dir / filename
+
+            # Auto-detect format
+            if format == "auto":
+                if filename.endswith(('.h5', '.hdf5')):
+                    format = "hdf5"
+                elif filename.endswith('.pkl'):
+                    format = "pickle"
+                elif filename.endswith('.npy'):
+                    format = "numpy"
+                else:
+                    format = "pickle"
+
+            # Save data based on format
+            if format == "hdf5":
+                with h5py.File(file_path, 'w') as f:
+                    if isinstance(data, dict):
+                        for key, value in data.items():
+                            if isinstance(value, torch.Tensor):
+                                value = value.detach().cpu().numpy()
+                            f.create_dataset(key, data=value)
+                    else:
+                        if isinstance(data, torch.Tensor):
+                            data = data.detach().cpu().numpy()
+                        f.create_dataset('data', data=data)
+
+            elif format == "numpy":
+                if isinstance(data, torch.Tensor):
+                    data = data.detach().cpu().numpy()
+                np.save(file_path, data)
+
+            elif format == "pickle":
+                with open(file_path, 'wb') as f:
+                    pickle.dump(data, f)
+
+            # Log to MLflow
+            mlflow.log_artifact(str(file_path), artifact_path)
+
+            # Cleanup
+            file_path.unlink()
+
+            logger.info(f"Logged data artifact: {filename}")
+
+        except Exception as e:
+            logger.error(f"Failed to log data artifact {filename}: {e}")
+
+    def log_singularity_results(self,
+                               results: List,
+                               artifact_path: str = "results"):
+        """Log singularity detection results
+
+        Args:
+            results: List of SingularityDetectionResult objects
+            artifact_path: Artifact directory path
+        """
+        if not results:
+            logger.warning("No singularity results to log")
+            return
+
+        try:
+            # Convert results to serializable format
+            serializable_results = []
+            metrics_summary = {
+                'num_singularities': len(results),
+                'avg_lambda': 0.0,
+                'avg_confidence': 0.0,
+                'avg_precision': 0.0
+            }
+
+            lambda_values = []
+            confidences = []
+            precisions = []
+
+            for i, result in enumerate(results):
+                result_dict = {
+                    'index': i,
+                    'singularity_type': result.singularity_type.value,
+                    'lambda_value': float(result.lambda_value),
+                    'instability_order': int(result.instability_order),
+                    'confidence_score': float(result.confidence_score),
+                    'time_to_blowup': float(result.time_to_blowup),
+                    'residual_error': float(result.residual_error),
+                    'precision_achieved': float(result.precision_achieved)
+                }
+                serializable_results.append(result_dict)
+
+                lambda_values.append(result.lambda_value)
+                confidences.append(result.confidence_score)
+                precisions.append(result.precision_achieved)
+
+            # Calculate summary metrics
+            if lambda_values:
+                metrics_summary.update({
+                    'avg_lambda': float(np.mean(lambda_values)),
+                    'std_lambda': float(np.std(lambda_values)),
+                    'min_lambda': float(np.min(lambda_values)),
+                    'max_lambda': float(np.max(lambda_values)),
+                    'avg_confidence': float(np.mean(confidences)),
+                    'avg_precision': float(np.mean(precisions)),
+                    'best_precision': float(np.min(precisions))
+                })
+
+            # Log summary metrics
+            self.log_metrics(metrics_summary)
+
+            # Log detailed results
+            self.log_data_artifact(
+                serializable_results,
+                "singularity_results.json",
+                artifact_path,
+                format="pickle"
+            )
+
+            logger.info(f"Logged {len(results)} singularity detection results")
+
+        except Exception as e:
+            logger.error(f"Failed to log singularity results: {e}")
+
+    def compare_runs(self,
+                    run_ids: List[str],
+                    metrics: Optional[List[str]] = None) -> Dict:
+        """Compare multiple runs
+
+        Args:
+            run_ids: List of run IDs to compare
+            metrics: List of metrics to compare
+
+        Returns:
+            Comparison data dictionary
+        """
+        comparison_data = {}
+
+        for run_id in run_ids:
+            try:
+                run = self.client.get_run(run_id)
+                run_data = {
+                    'run_id': run_id,
+                    'status': run.info.status,
+                    'start_time': run.info.start_time,
+                    'end_time': run.info.end_time,
+                    'params': run.data.params,
+                    'metrics': run.data.metrics
+                }
+                comparison_data[run_id] = run_data
+
+            except Exception as e:
+                logger.error(f"Failed to get data for run {run_id}: {e}")
+
+        return comparison_data
+
+    def get_best_run(self, metric_name: str, direction: str = "min") -> Optional[str]:
+        """Get the best run based on a metric
+
+        Args:
+            metric_name: Name of the metric to optimize
+            direction: 'min' or 'max'
+
+        Returns:
+            Best run ID or None
+        """
+        try:
+            experiment = mlflow.get_experiment(self.experiment_id)
+            runs = mlflow.search_runs(
+                experiment_ids=[self.experiment_id],
+                filter_string="",
+                order_by=[f"metrics.{metric_name} {'ASC' if direction == 'min' else 'DESC'}"]
+            )
+
+            if not runs.empty:
+                best_run_id = runs.iloc[0]['run_id']
+                logger.info(f"Best run for {metric_name}: {best_run_id}")
+                return best_run_id
+
+        except Exception as e:
+            logger.error(f"Failed to find best run: {e}")
+
+        return None
+
+    def cleanup_temp_artifacts(self):
+        """Clean up temporary artifact directory"""
+        temp_dir = Path("./temp_artifacts")
+        if temp_dir.exists():
+            for file_path in temp_dir.iterdir():
+                file_path.unlink()
+            temp_dir.rmdir()
+
+# Context manager for automatic run management
+class MLflowRunContext:
+    """Context manager for MLflow runs"""
+
+    def __init__(self, tracker: ExperimentTracker, run_name: str = None, **kwargs):
+        self.tracker = tracker
+        self.run_name = run_name
+        self.kwargs = kwargs
+        self.run_id = None
+
+    def __enter__(self):
+        self.run_id = self.tracker.start_run(self.run_name, **self.kwargs)
+        return self.tracker
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.tracker.end_run()
+        self.tracker.cleanup_temp_artifacts()
+
+# Convenience function
+def create_experiment_tracker(experiment_name: str = None) -> ExperimentTracker:
+    """Create experiment tracker with default settings"""
+    if experiment_name is None:
+        experiment_name = f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    return ExperimentTracker(experiment_name)
+
+if __name__ == "__main__":
+    # Example usage
+    tracker = create_experiment_tracker("test_experiment")
+
+    with MLflowRunContext(tracker, "test_run") as tracker:
+        # Log some test data
+        tracker.log_config({"test_param": 1.0, "nested": {"value": 2}})
+        tracker.log_metrics({"test_metric": 0.95}, step=1)
+
+        print("Experiment tracking test completed!")

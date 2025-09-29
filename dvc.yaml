@@ -1,0 +1,136 @@
+# DVC Pipeline Configuration
+# Data Version Control for large-scale fluid dynamics datasets
+
+stages:
+  # Data preparation stage
+  prepare_data:
+    cmd: python src/data/prepare_training_data.py
+    deps:
+      - src/data/prepare_training_data.py
+      - configs/data/training_data.yaml
+    outs:
+      - data/processed/training_data.h5
+      - data/processed/validation_data.h5
+    params:
+      - data.grid_resolution
+      - data.time_steps
+      - data.num_samples
+
+  # PINN training stage
+  train_pinn:
+    cmd: python -m src.cli train --config high_precision --epochs 10000
+    deps:
+      - src/pinn_solver.py
+      - src/config_manager.py
+      - configs/pinn/high_precision_pinn.yaml
+      - data/processed/training_data.h5
+    outs:
+      - models/pinn_model.pth
+      - outputs/training_history.json
+    metrics:
+      - outputs/training_metrics.json
+    params:
+      - pinn.training.max_epochs
+      - pinn.architecture.hidden_layers
+      - pinn.precision.residual_tolerance
+
+  # Singularity detection stage
+  detect_singularities:
+    cmd: python -m src.cli detect data/test/simulation_data.h5 --config ipm_detector
+    deps:
+      - src/unstable_singularity_detector.py
+      - models/pinn_model.pth
+      - data/test/simulation_data.h5
+      - configs/detector/ipm_detector.yaml
+    outs:
+      - outputs/detection_results.h5
+      - outputs/singularity_analysis.json
+    metrics:
+      - outputs/detection_metrics.json
+    params:
+      - detector.precision_target
+      - detector.confidence_threshold
+
+  # Visualization stage
+  generate_plots:
+    cmd: python -m src.cli visualize outputs/detection_results.h5 --type all
+    deps:
+      - src/visualization.py
+      - outputs/detection_results.h5
+      - outputs/singularity_analysis.json
+    outs:
+      - outputs/figures/lambda_instability_pattern.png
+      - outputs/figures/singularity_evolution.png
+      - outputs/figures/precision_analysis.png
+
+# Parameters for the entire pipeline
+params:
+  # Data configuration
+  data:
+    grid_resolution: 128
+    time_steps: 1000
+    num_samples: 50
+    equation_types: ["ipm", "boussinesq", "euler_3d"]
+
+  # Training configuration
+  pinn:
+    training:
+      max_epochs: 10000
+      learning_rate: 1e-3
+      batch_size: 1024
+    architecture:
+      hidden_layers: [64, 64, 64, 64, 64]
+      activation: "tanh"
+    precision:
+      residual_tolerance: 1e-12
+      dtype: "float64"
+
+  # Detection configuration
+  detector:
+    precision_target: 1e-13
+    confidence_threshold: 0.75
+    max_instability_order: 10
+
+  # System configuration
+  system:
+    device: "auto"
+    random_seed: 42
+    num_workers: 4
+
+# Plots configuration for DVC plots
+plots:
+  - outputs/training_metrics.json:
+      template: linear
+      x: epoch
+      y:
+        - total_loss
+        - pde_loss
+        - boundary_loss
+      title: "PINN Training Convergence"
+      x_label: "Epoch"
+      y_label: "Loss"
+
+  - outputs/detection_metrics.json:
+      template: scatter
+      x: lambda_value
+      y: instability_order
+      title: "Lambda-Instability Pattern Discovery"
+      x_label: "Lambda (Blow-up Rate)"
+      y_label: "Instability Order"
+
+# Metrics configuration
+metrics:
+  - outputs/training_metrics.json:
+      cache: false
+  - outputs/detection_metrics.json:
+      cache: false
+
+# Data remotes configuration (for cloud storage)
+# Uncomment and configure as needed
+# remote:
+#   - name: s3remote
+#     url: s3://your-bucket/unstable-singularity-data
+#     config:
+#       region: us-west-2
+#       access_key_id: ${AWS_ACCESS_KEY_ID}
+#       secret_access_key: ${AWS_SECRET_ACCESS_KEY}

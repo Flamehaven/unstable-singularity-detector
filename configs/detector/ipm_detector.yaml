@@ -1,0 +1,41 @@
+# Detector configuration for Incompressible Porous Media (IPM)
+# Implements DeepMind's empirical pattern: λ = -0.125 × order + 1.875
+
+_target_: src.unstable_singularity_detector.UnstableSingularityDetector
+
+# Core detection parameters
+equation_type: "ipm"
+precision_target: 1.0e-13  # Near machine precision
+confidence_threshold: 0.75
+max_instability_order: 10
+
+# IPM-specific parameters
+lambda_pattern:
+  slope: -0.125
+  intercept: 1.875
+  validation_tolerance: 0.05
+
+# Detection algorithm settings
+detection:
+  candidate_threshold: 1.0e8
+  gradient_threshold: 1.0e7
+  hessian_eigenvalue_threshold: 1.0e-6
+
+# Spatial analysis
+spatial:
+  analysis_radius: 20  # Grid points around singularity
+  interpolation_method: "cubic"
+  smoothing_factor: 0.01
+
+# Temporal analysis
+temporal:
+  min_time_points: 10
+  growth_rate_window: 5
+  blowup_time_tolerance: 0.05
+
+# Performance optimization
+optimization:
+  batch_size: 1000
+  use_gpu_acceleration: true
+  memory_efficient: true
+  parallel_processing: true

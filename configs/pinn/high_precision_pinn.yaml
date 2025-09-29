@@ -1,0 +1,78 @@
+# High-precision PINN configuration for singularity detection
+# Based on DeepMind's self-similar parameterization methodology
+
+_target_: src.pinn_solver.PINNConfig
+
+# Network architecture
+architecture:
+  hidden_layers: [64, 64, 64, 64, 64]  # Deep network for complexity
+  activation: "tanh"
+  initialization: "xavier_normal"
+  batch_normalization: false  # Can interfere with precision
+  dropout_rate: 0.0
+
+# Training configuration
+training:
+  learning_rate: 1.0e-3
+  max_epochs: 10000
+  batch_size: 1024
+  convergence_threshold: 1.0e-12
+  patience: 500
+  early_stopping: true
+
+# Loss weighting
+loss_weights:
+  pde_weight: 1.0
+  boundary_weight: 1000.0  # Strong boundary enforcement
+  initial_weight: 100.0
+  adaptive_weights: true
+  weight_decay: 1.0e-6
+
+# Optimizer settings
+optimizer:
+  type: "Adam"  # Initial optimizer
+  adam_betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
+  switch_to_lbfgs: true  # Switch for final precision
+  lbfgs_switch_epoch: 8000
+  lbfgs_max_iter: 500
+
+# Self-similar configuration
+self_similar:
+  enabled: true
+  T_blowup: 1.0
+  lambda_init: 1.5  # Initial guess
+  alpha_init: 0.5   # Spatial scaling
+  learnable_params: true
+  param_lr: 1.0e-4
+
+# Domain configuration
+domain:
+  spatial_bounds:
+    x_min: -2.0
+    x_max: 2.0
+    y_min: -2.0
+    y_max: 2.0
+  temporal_bounds:
+    t_min: 0.0
+    t_max: 0.95  # Avoid exact blowup time
+
+# Training points
+training_points:
+  n_interior: 15000
+  n_boundary: 2000
+  n_initial: 1000
+  sampling_strategy: "uniform"  # uniform, adaptive, importance
+
+# Precision settings
+precision:
+  dtype: "float64"
+  residual_tolerance: 1.0e-12
+  gradient_tolerance: 1.0e-10
+  parameter_tolerance: 1.0e-12
+
+# Checkpointing
+checkpointing:
+  save_every_n_epochs: 1000
+  save_best_model: true
+  save_optimizer_state: true
