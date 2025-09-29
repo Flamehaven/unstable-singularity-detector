@@ -13,8 +13,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import torch
 import argparse
 import matplotlib.pyplot as plt
-from src.pinn_solver import PINNSolver, PINNConfig, IncompressiblePorousMedia, BoussinesqEquation, EulerEquation3D
-from src.gauss_newton_optimizer import GaussNewtonOptimizer
+from src.pinn_solver import PINNSolver, PINNConfig, IncompressiblePorousMedia, BoussinesqEquation, Euler3D
+from src.gauss_newton_optimizer import AdaptivePrecisionOptimizer
 from src.visualization import SingularityVisualizer
 
 def setup_equation(equation_type):
@@ -22,7 +22,7 @@ def setup_equation(equation_type):
     equations = {
         "ipm": IncompressiblePorousMedia(),
         "boussinesq": BoussinesqEquation(),
-        "euler_3d": EulerEquation3D()
+        "euler_3d": Euler3D()
     }
 
     if equation_type not in equations:

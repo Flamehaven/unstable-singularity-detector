@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from pinn_solver import (
     PINNSolver, PINNConfig, PhysicsInformedNN, SelfSimilarPINN,
-    IncompressiblePorousMedia, BoussinesqEquation, EulerEquation3D
+    IncompressiblePorousMedia, BoussinesqEquation, Euler3D
 )
 
 class TestPINNConfig:
@@ -171,7 +171,7 @@ class TestPDESystems:
 
     def test_euler_3d(self):
         """Test 3D Euler equation implementation"""
-        pde = EulerEquation3D()
+        pde = Euler3D()
 
         assert pde.dimension == 3
         assert pde.equation_type == "euler_3d"

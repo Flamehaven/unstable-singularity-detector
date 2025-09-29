@@ -208,7 +208,7 @@ Contributors will be recognized through:
 
 - **GitHub Issues**: For bug reports and feature requests
 - **GitHub Discussions**: For questions and community discussions
-- **Email**: research@flamehaven.ai (for direct collaboration)
+- **Email**: info@flamehaven.space (for direct collaboration)
 
 ---
 

@@ -125,12 +125,12 @@ def train(
 
             # Initialize components
             progress.update(task, description="Initializing PINN solver...")
-            from .pinn_solver import IncompressiblePorousMedia, BoussinesqEquation, EulerEquation3D
+            from .pinn_solver import IncompressiblePorousMedia, BoussinesqEquation, Euler3D
 
             equation_map = {
                 "ipm": IncompressiblePorousMedia(),
                 "boussinesq": BoussinesqEquation(),
-                "euler_3d": EulerEquation3D()
+                "euler_3d": Euler3D()
             }
 
             if equation not in equation_map:
