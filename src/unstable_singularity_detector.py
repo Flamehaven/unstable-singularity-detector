@@ -139,7 +139,8 @@ class UnstableSingularityDetector:
         temporal_gradient = torch.gradient(solution_field, dim=0)[0]
 
         # Look for regions where gradients grow rapidly
-        gradient_magnitude = sum(torch.norm(grad, dim=0) for grad in spatial_gradients)
+        # Fix: compute gradient magnitude properly maintaining time dimension
+        gradient_magnitude = torch.sqrt(sum(grad**2 for grad in spatial_gradients))
 
         # Identify potential blow-up points
         time_steps = solution_field.shape[0]

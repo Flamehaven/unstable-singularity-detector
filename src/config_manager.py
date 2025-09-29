@@ -220,17 +220,17 @@ class ConfigManager:
                     return False
 
             # Validate precision setting
-            if "precision" in cfg.global:
+            if "precision" in cfg.get("global", {}):
                 valid_precisions = ["float32", "float64"]
-                if cfg.global.precision not in valid_precisions:
-                    logger.error(f"Invalid precision: {cfg.global.precision}")
+                if cfg.get("global", {}).get("precision") not in valid_precisions:
+                    logger.error(f"Invalid precision: {cfg.get('global', {}).get('precision')}")
                     return False
 
             # Validate device setting
-            if "device" in cfg.global:
+            if "device" in cfg.get("global", {}):
                 valid_devices = ["auto", "cpu", "cuda"]
-                if cfg.global.device not in valid_devices:
-                    logger.error(f"Invalid device: {cfg.global.device}")
+                if cfg.get("global", {}).get("device") not in valid_devices:
+                    logger.error(f"Invalid device: {cfg.get('global', {}).get('device')}")
                     return False
 
             logger.info("Configuration validation passed")
