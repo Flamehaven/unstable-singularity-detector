@@ -20,9 +20,10 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import seaborn as sns
 import torch
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union, Sequence
 import logging
 from dataclasses import dataclass
+from collections import Counter
 import h5py
 from pathlib import Path
 import json
@@ -74,7 +75,52 @@ class SingularityVisualizer:
             'figure.figsize': config.figure_size
         })
 
+
         logger.info("Initialized SingularityVisualizer")
+
+    @staticmethod
+    def _get_result_value(result, attr, default=None):
+        """Safely fetch a value from a result object or dict."""
+        if hasattr(result, attr):
+            return getattr(result, attr)
+        if isinstance(result, dict):
+            return result.get(attr, default)
+        return default
+
+    @staticmethod
+    def _as_array(data):
+        """Convert input data to a numpy array when possible."""
+        if data is None:
+            return None
+        if isinstance(data, np.ndarray):
+            return data
+        try:
+            return np.asarray(data)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _compute_center_series(field_history):
+        """Compute central magnitudes from a sequence of fields."""
+        if not field_history:
+            return None
+        center_values = []
+        for field in field_history:
+            arr = SingularityVisualizer._as_array(field)
+            if arr is None:
+                continue
+            if arr.ndim > 3:
+                arr = np.linalg.norm(arr, axis=-1)
+            if arr.ndim == 0:
+                continue
+            indices = tuple(dim // 2 for dim in arr.shape)
+            try:
+                center_values.append(float(np.abs(arr[indices])))
+            except Exception:
+                continue
+        if not center_values:
+            return None
+        return np.asarray(center_values)
 
     def plot_lambda_instability_pattern(self, singularity_events: List,
                                       equation_type: str = "euler_3d",
@@ -544,6 +590,395 @@ class SingularityVisualizer:
         logger.info(f"Animation saved to {save_path}")
         plt.show()
 
+
+    def plot_lambda_vs_instability_regression(self, singularity_results, save_path: Optional[str] = None):
+        """Plot lambda versus instability order with an optional linear regression fit."""
+        if not singularity_results:
+            logger.warning("No singularity results provided for lambda-instability regression plot")
+            return None
+
+        orders = []
+        lambdas = []
+        confidences = []
+        for result in singularity_results:
+            order_val = self._get_result_value(result, "instability_order")
+            lambda_val = self._get_result_value(result, "lambda_value")
+            confidence_val = self._get_result_value(result, "confidence_score", 1.0)
+            if order_val is None or lambda_val is None:
+                continue
+            orders.append(float(order_val))
+            lambdas.append(float(lambda_val))
+            confidences.append(float(confidence_val))
+
+        if len(orders) < 2:
+            logger.warning("Not enough valid data points for lambda-instability regression plot")
+            return None
+
+        order_array = np.asarray(orders).reshape(-1, 1)
+        lambda_array = np.asarray(lambdas)
+        confidence_array = np.asarray(confidences)
+
+        regression_model = None
+        regression_line = None
+        order_grid = None
+        try:
+            from sklearn.linear_model import LinearRegression
+            regression_model = LinearRegression()
+            regression_model.fit(order_array, lambda_array)
+            order_grid = np.linspace(order_array.min(), order_array.max(), 200).reshape(-1, 1)
+            regression_line = regression_model.predict(order_grid)
+        except Exception as exc:  # pragma: no cover - optional dependency
+            logger.warning("Linear regression fit skipped: %s", exc)
+
+        plt.figure(figsize=(8, 6))
+        scatter = plt.scatter(order_array.flatten(), lambda_array,
+                              c=confidence_array, cmap=self.config.color_scheme,
+                              edgecolors='black', s=90, alpha=0.85)
+        if confidence_array.ptp() > 1e-9:
+            plt.colorbar(scatter, label="Confidence Score")
+
+        if regression_model is not None and regression_line is not None and order_grid is not None:
+            plt.plot(order_grid.flatten(), regression_line, 'r--', linewidth=2,
+                     label=(f"Fit: lambda = {regression_model.coef_[0]:.3f} * order + "
+                            f"{regression_model.intercept_:.3f}"))
+            plt.legend()
+
+        plt.title("Lambda vs Instability Order")
+        plt.xlabel("Instability Order")
+        plt.ylabel("Lambda (Blow-up Rate)")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.config.dpi, bbox_inches='tight')
+            logger.info("Lambda-instability regression plot saved to %s", save_path)
+
+        plt.show()
+        return plt.gcf()
+
+    def plot_precision_vs_confidence(self, singularity_results, save_path: Optional[str] = None):
+        """Plot precision achieved versus confidence on a logarithmic scale."""
+        if not singularity_results:
+            logger.warning("No singularity results provided for precision-confidence plot")
+            return None
+
+        confidences = []
+        precisions = []
+        for result in singularity_results:
+            conf = self._get_result_value(result, "confidence_score")
+            precision = self._get_result_value(result, "precision_achieved")
+            if conf is None or precision is None:
+                continue
+            confidences.append(float(conf))
+            precisions.append(max(float(precision), 1e-16))
+
+        if not confidences:
+            logger.warning("No valid precision-confidence pairs available for plotting")
+            return None
+
+        plt.figure(figsize=(8, 5))
+        plt.scatter(confidences, precisions, color='navy', edgecolors='black', s=90, alpha=0.85)
+        plt.yscale('log')
+        plt.xlabel('Confidence Score')
+        plt.ylabel('Precision Achieved')
+        plt.title('Precision vs Confidence')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.config.dpi, bbox_inches='tight')
+            logger.info("Precision-confidence plot saved to %s", save_path)
+
+        plt.show()
+        return plt.gcf()
+
+    def plot_singularity_type_histogram(self, singularity_results, save_path: Optional[str] = None):
+        """Plot a histogram of detected singularity types."""
+        if not singularity_results:
+            logger.warning("No singularity results provided for type histogram")
+            return None
+
+        type_labels = []
+        for result in singularity_results:
+            singularity_type = self._get_result_value(result, "singularity_type")
+            if singularity_type is None:
+                continue
+            if hasattr(singularity_type, "value"):
+                singularity_type = singularity_type.value
+            type_labels.append(str(singularity_type))
+
+        if not type_labels:
+            logger.warning("No singularity types available for histogram")
+            return None
+
+        counts = Counter(type_labels)
+        plt.figure(figsize=(8, 6))
+        plt.bar(list(counts.keys()), list(counts.values()), color='steelblue', edgecolor='black', alpha=0.85)
+        plt.xlabel('Singularity Type')
+        plt.ylabel('Count')
+        plt.title('Singularity Type Distribution')
+        plt.xticks(rotation=30, ha='right')
+        plt.grid(True, axis='y', alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.config.dpi, bbox_inches='tight')
+            logger.info("Singularity type histogram saved to %s", save_path)
+
+        plt.show()
+        return plt.gcf()
+
+    def plot_central_blowup_profile(self,
+                                   time_values,
+                                   central_values=None,
+                                   lambda_estimate: Optional[float] = None,
+                                   save_path: Optional[str] = None):
+        """Plot the central blow-up profile over time."""
+        times = self._as_array(time_values)
+        if times is None or times.size == 0:
+            logger.warning("No time samples provided for central blow-up profile")
+            return None
+
+        if central_values is not None:
+            central = self._as_array(central_values)
+            if central is None or central.size != times.size:
+                logger.warning("Central values are invalid or mismatch time samples")
+                return None
+        elif lambda_estimate is not None:
+            epsilon = 1e-12
+            central = (1.0 / np.maximum(epsilon, 1.0 - times)) ** float(lambda_estimate)
+        else:
+            logger.warning("Neither central values nor lambda estimate provided for blow-up profile plot")
+            return None
+
+        plt.figure(figsize=(8, 5))
+        plt.plot(times, central, 'b-', linewidth=2)
+        plt.yscale('log')
+        plt.xlabel('Time')
+        plt.ylabel('Central Magnitude')
+        plt.title('Central Blow-up Profile Over Time')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.config.dpi, bbox_inches='tight')
+            logger.info("Central blow-up profile saved to %s", save_path)
+
+        plt.show()
+        return plt.gcf()
+
+    def plot_pde_residual_heatmap(self, residual_field, save_path: Optional[str] = None):
+        """Plot a heatmap of PDE residual magnitudes."""
+        residual = self._as_array(residual_field)
+        if residual is None:
+            logger.warning("No residual field provided for heatmap")
+            return None
+
+        if residual.ndim > 3:
+            residual = np.linalg.norm(residual, axis=-1)
+        if residual.ndim == 3:
+            residual = residual[:, :, residual.shape[2] // 2]
+
+        plt.figure(figsize=(8, 6))
+        im = plt.imshow(np.abs(residual), origin='lower', cmap='hot')
+        plt.colorbar(im, label='Residual Magnitude')
+        plt.xlabel('X Index')
+        plt.ylabel('Y Index')
+        plt.title('PDE Residual Heatmap')
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.config.dpi, bbox_inches='tight')
+            logger.info("Residual heatmap saved to %s", save_path)
+
+        plt.show()
+        return plt.gcf()
+
+    def plot_radial_symmetry_profile(self, spatial_profile, save_path: Optional[str] = None, bins: int = 25):
+        """Plot the radial symmetry profile derived from a spatial field."""
+        profile = self._as_array(spatial_profile)
+        if profile is None:
+            logger.warning("No spatial profile provided for radial symmetry plot")
+            return None
+
+        if profile.ndim > 2:
+            profile = np.linalg.norm(profile, axis=-1)
+
+        y_indices, x_indices = np.indices(profile.shape)
+        center_y, center_x = profile.shape[0] // 2, profile.shape[1] // 2
+        radii = np.sqrt((x_indices - center_x) ** 2 + (y_indices - center_y) ** 2)
+        radius_bins = np.linspace(0.0, radii.max(), bins)
+
+        radial_means = []
+        radius_centers = []
+        for start, end in zip(radius_bins[:-1], radius_bins[1:]):
+            mask = (radii >= start) & (radii < end)
+            if not np.any(mask):
+                continue
+            radial_means.append(float(np.mean(profile[mask])))
+            radius_centers.append((start + end) / 2.0)
+
+        if not radial_means:
+            logger.warning("Unable to compute radial symmetry profile")
+            return None
+
+        plt.figure(figsize=(8, 5))
+        plt.plot(radius_centers, radial_means, 'teal', linewidth=2)
+        plt.xlabel('Radius')
+        plt.ylabel('Average Magnitude')
+        plt.title('Radial Symmetry Profile')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.config.dpi, bbox_inches='tight')
+            logger.info("Radial symmetry profile saved to %s", save_path)
+
+        plt.show()
+        return plt.gcf()
+
+    def plot_lambda_learning_curve(self, lambda_history, epochs=None, save_path: Optional[str] = None):
+        """Plot the learning curve for the lambda parameter."""
+        lambda_values = self._as_array(lambda_history)
+        if lambda_values is None or lambda_values.size == 0:
+            logger.warning("No lambda history available for learning curve plot")
+            return None
+
+        if epochs is None:
+            epochs = np.arange(lambda_values.size)
+        else:
+            epochs = self._as_array(epochs)
+            if epochs is None or epochs.size != lambda_values.size:
+                logger.warning("Epoch indices not aligned with lambda history")
+                return None
+
+        plt.figure(figsize=(8, 5))
+        plt.plot(epochs, lambda_values, 'b-', linewidth=2)
+        plt.xlabel('Epoch')
+        plt.ylabel('Lambda Value')
+        plt.title('Lambda Learning Curve')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.config.dpi, bbox_inches='tight')
+            logger.info("Lambda learning curve saved to %s", save_path)
+
+        plt.show()
+        return plt.gcf()
+
+    def plot_alpha_learning_curve(self, alpha_history, epochs=None, save_path: Optional[str] = None):
+        """Plot the learning curve for the alpha parameter."""
+        alpha_values = self._as_array(alpha_history)
+        if alpha_values is None or alpha_values.size == 0:
+            logger.warning("No alpha history available for learning curve plot")
+            return None
+
+        if epochs is None:
+            epochs = np.arange(alpha_values.size)
+        else:
+            epochs = self._as_array(epochs)
+            if epochs is None or epochs.size != alpha_values.size:
+                logger.warning("Epoch indices not aligned with alpha history")
+                return None
+
+        plt.figure(figsize=(8, 5))
+        plt.plot(epochs, alpha_values, 'g-', linewidth=2)
+        plt.xlabel('Epoch')
+        plt.ylabel('Alpha Value')
+        plt.title('Alpha Learning Curve')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.config.dpi, bbox_inches='tight')
+            logger.info("Alpha learning curve saved to %s", save_path)
+
+        plt.show()
+        return plt.gcf()
+
+    def plot_hessian_eigenvalue_histogram(self, eigenvalues, save_path: Optional[str] = None, bins: int = 20):
+        """Plot a histogram of Hessian eigenvalues."""
+        eigen_array = self._as_array(eigenvalues)
+        if eigen_array is None or eigen_array.size == 0:
+            logger.warning("No eigenvalues provided for Hessian histogram")
+            return None
+
+        plt.figure(figsize=(8, 5))
+        plt.hist(eigen_array, bins=bins, color='slateblue', alpha=0.85, edgecolor='black')
+        plt.xlabel('Eigenvalue')
+        plt.ylabel('Frequency')
+        plt.title('Hessian Eigenvalue Distribution')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.config.dpi, bbox_inches='tight')
+            logger.info("Hessian eigenvalue histogram saved to %s", save_path)
+
+        plt.show()
+        return plt.gcf()
+
+    def plot_singularity_radar_chart(self,
+                                     singularity_results,
+                                     metrics: Optional[List[str]] = None,
+                                     top_n: int = 3,
+                                     save_path: Optional[str] = None):
+        """Plot a radar chart comparing multiple singularities."""
+        if not singularity_results:
+            logger.warning("No singularity results provided for radar chart")
+            return None
+
+        metrics = metrics or [
+            "lambda_value",
+            "instability_order",
+            "confidence_score",
+            "precision_achieved",
+            "residual_error"
+        ]
+
+        selected = singularity_results[:max(1, top_n)]
+        processed_data = []
+        for result in selected:
+            values = []
+            for metric in metrics:
+                raw = self._get_result_value(result, metric)
+                if raw is None:
+                    values = []
+                    break
+                numeric = float(raw)
+                if metric in {"precision_achieved", "residual_error"}:
+                    numeric = -np.log10(max(numeric, 1e-16))
+                values.append(numeric)
+            if values:
+                processed_data.append(values)
+
+        if not processed_data:
+            logger.warning("Insufficient data to plot singularity radar chart")
+            return None
+
+        label_names = [metric.replace('_', ' ').title() for metric in metrics]
+        from math import pi
+        angles = [n / float(len(label_names)) * 2.0 * pi for n in range(len(label_names))]
+        angles += angles[:1]
+
+        plt.figure(figsize=(8, 8))
+        for idx, values in enumerate(processed_data, start=1):
+            plot_values = values + values[:1]
+            plt.polar(angles, plot_values, linewidth=2, label=f"Singularity {idx}")
+
+        plt.xticks(angles[:-1], label_names)
+        plt.title('Singularity Comparison Radar Chart')
+        plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=self.config.dpi, bbox_inches='tight')
+            logger.info("Singularity radar chart saved to %s", save_path)
+
+        plt.show()
+        return plt.gcf()
+
     def plot_empirical_discovery(self, all_results: List[Dict],
                                 equation_types: List[str],
                                 save_path: Optional[str] = None) -> go.Figure:
@@ -663,56 +1098,132 @@ class SingularityVisualizer:
 
         return fig
 
+
     def generate_publication_figures(self, all_results: Dict,
                                    output_dir: str = "./publication_figures") -> None:
-        """
-        Generate complete set of publication-quality figures
-        """
-        Path(output_dir).mkdir(exist_ok=True)
+        """Generate the canonical set of ten publication-quality figures."""
+        output_path = Path(output_dir)
+        output_path.mkdir(exist_ok=True)
 
         logger.info("Generating publication-quality figures...")
 
-        # Figure 1: Lambda-instability pattern discovery
-        if 'singularity_events' in all_results:
-            self.plot_lambda_instability_pattern(
-                all_results['singularity_events'],
-                save_path=f"{output_dir}/fig1_lambda_pattern.png"
+        singularity_results = all_results.get("singularity_events") or all_results.get("singularity_results")
+
+        if singularity_results:
+            self.plot_lambda_vs_instability_regression(
+                singularity_results,
+                save_path=str(output_path / "fig01_lambda_vs_instability.png")
+            )
+            self.plot_precision_vs_confidence(
+                singularity_results,
+                save_path=str(output_path / "fig02_precision_vs_confidence.png")
+            )
+            self.plot_singularity_type_histogram(
+                singularity_results,
+                save_path=str(output_path / "fig03_singularity_type_histogram.png")
+            )
+        else:
+            logger.warning("Singularity results missing; skipping figures 1-3 and 10")
+
+        time_history = all_results.get("time_history")
+        if time_history is None and "simulation_results" in all_results:
+            time_history = all_results["simulation_results"].get("time_history")
+        time_array = self._as_array(time_history)
+
+        central_profile = all_results.get("central_profile")
+        if central_profile is None:
+            field_history = all_results.get("field_history")
+            if field_history is None and "simulation_results" in all_results:
+                field_history = all_results["simulation_results"].get("field_history")
+            if field_history:
+                central_profile = self._compute_center_series(field_history)
+        central_array = self._as_array(central_profile)
+
+        lambda_reference = None
+        if singularity_results:
+            lambda_reference = self._get_result_value(singularity_results[0], "lambda_value")
+
+        if time_array is not None:
+            if central_array is not None and central_array.size == time_array.size:
+                self.plot_central_blowup_profile(
+                    time_array,
+                    central_values=central_array,
+                    save_path=str(output_path / "fig04_central_blowup_profile.png")
+                )
+            elif lambda_reference is not None:
+                self.plot_central_blowup_profile(
+                    time_array,
+                    lambda_estimate=float(lambda_reference),
+                    save_path=str(output_path / "fig04_central_blowup_profile.png")
+                )
+            else:
+                logger.warning("Central profile data missing; skipping figure 4")
+        else:
+            logger.warning("Time history missing; skipping figure 4")
+
+        residual_field = (all_results.get("residual_grid") or
+                          all_results.get("pde_residuals"))
+        if residual_field is None and "simulation_results" in all_results:
+            residual_field = all_results["simulation_results"].get("pde_residuals")
+        if residual_field is not None:
+            self.plot_pde_residual_heatmap(
+                residual_field,
+                save_path=str(output_path / "fig05_pde_residual_heatmap.png")
+            )
+        else:
+            logger.warning("Residual data missing; skipping figure 5")
+
+        radial_profile = all_results.get("radial_profile")
+        if radial_profile is None and singularity_results:
+            radial_profile = self._get_result_value(singularity_results[0], "spatial_profile")
+        if radial_profile is not None:
+            self.plot_radial_symmetry_profile(
+                radial_profile,
+                save_path=str(output_path / "fig06_radial_symmetry_profile.png")
+            )
+        else:
+            logger.warning("Spatial profile missing; skipping figure 6")
+
+        lambda_history = (all_results.get("lambda_history") or
+                          (all_results.get("training_history") or {}).get("lambda"))
+        if lambda_history is not None:
+            self.plot_lambda_learning_curve(
+                lambda_history,
+                save_path=str(output_path / "fig07_lambda_learning_curve.png")
+            )
+        else:
+            logger.warning("Lambda history missing; skipping figure 7")
+
+        alpha_history = (all_results.get("alpha_history") or
+                         (all_results.get("training_history") or {}).get("alpha"))
+        if alpha_history is not None:
+            self.plot_alpha_learning_curve(
+                alpha_history,
+                save_path=str(output_path / "fig08_alpha_learning_curve.png")
+            )
+        else:
+            logger.warning("Alpha history missing; skipping figure 8")
+
+        eigenvalues = all_results.get("hessian_eigenvalues")
+        if eigenvalues is None and "optimization_results" in all_results:
+            eigenvalues = all_results["optimization_results"].get("hessian_eigenvalues")
+        if eigenvalues is not None:
+            self.plot_hessian_eigenvalue_histogram(
+                eigenvalues,
+                save_path=str(output_path / "fig09_hessian_eigenvalue_histogram.png")
+            )
+        else:
+            logger.warning("Hessian eigenvalues missing; skipping figure 9")
+
+        if singularity_results:
+            self.plot_singularity_radar_chart(
+                singularity_results,
+                top_n=all_results.get("radar_top_n", 3),
+                save_path=str(output_path / "fig10_singularity_radar_chart.png")
             )
 
-        # Figure 2: High-precision convergence analysis
-        if 'pinn_results' in all_results and 'optimization_results' in all_results:
-            self.plot_precision_analysis(
-                all_results['pinn_results'],
-                all_results['optimization_results'],
-                save_path=f"{output_dir}/fig2_precision_analysis.png"
-            )
+        logger.info("Publication figures saved to %s", output_path)
 
-        # Figure 3: 3D singularity evolution
-        if 'simulation_results' in all_results:
-            self.plot_3d_singularity_evolution(
-                all_results['simulation_results'],
-                save_path=f"{output_dir}/fig3_3d_evolution"
-            )
-
-        # Figure 4: PDE residual validation
-        if ('pinn_solution' in all_results and 'spatial_grid' in all_results
-            and 'pde_residuals' in all_results):
-            self.plot_residual_analysis(
-                all_results['pinn_solution'],
-                all_results['spatial_grid'],
-                all_results['pde_residuals'],
-                save_path=f"{output_dir}/fig4_residual_analysis.png"
-            )
-
-        # Figure 5: Animation of evolution
-        if 'field_history' in all_results and 'time_history' in all_results:
-            self.create_animation(
-                all_results['field_history'],
-                all_results['time_history'],
-                save_path=f"{output_dir}/fig5_evolution_animation.mp4"
-            )
-
-        logger.info(f"Publication figures saved to {output_dir}")
 
     def create_interactive_dashboard(self, all_results: Dict,
                                    save_path: str = "interactive_dashboard.html") -> None:
@@ -756,8 +1267,6 @@ if __name__ == "__main__":
     print("[=] Testing Advanced Visualization Suite...")
 
     # Create sample data for demonstration
-    from dataclasses import dataclass
-
     @dataclass
     class MockSingularityEvent:
         lambda_estimate: float

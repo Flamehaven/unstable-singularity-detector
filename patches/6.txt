@@ -1,0 +1,133 @@
+🛠️ Path #6 — Patch Set 6 (Distributed / Multi-GPU)
+1. PyTorch Lightning DDP 통합
+
+📍 파일: multistage_training.py
+
+*** Begin Patch
+*** Update File: multistage_training.py
+@@
+ from typing import Callable, Dict
+ import logging
++import pytorch_lightning as pl
++
++class PINNLightningModule(pl.LightningModule):
++    def __init__(self, network, optimizer_cls, lr=1e-3):
++        super().__init__()
++        self.network = network
++        self.optimizer_cls = optimizer_cls
++        self.lr = lr
++
++    def forward(self, x):
++        return self.network(x)
++
++    def training_step(self, batch, batch_idx):
++        x, y = batch
++        y_hat = self(x)
++        loss = torch.mean((y_hat - y)**2)
++        self.log("train_loss", loss)
++        return loss
++
++    def configure_optimizers(self):
++        return self.optimizer_cls(self.parameters(), lr=self.lr)
+*** End Patch
+
+2. Multi-GPU Trainer Wrapper
+
+📍 파일: multistage_training.py
+
+*** Begin Patch
+*** Update File: multistage_training.py
+@@ class MultiStageTrainer:
+-        history = train_function(
+-            network=self.stage1_network,
+-            max_epochs=self.config.stage1_epochs,
+-            target_loss=self.config.stage1_target_residual,
+-            checkpoint_freq=self.config.checkpoint_frequency
+-        )
++        # Lightning Trainer for multi-GPU
++        if getattr(self.config, "use_lightning", False):
++            module = PINNLightningModule(self.stage1_network, torch.optim.Adam, lr=1e-3)
++            trainer = pl.Trainer(
++                accelerator="gpu",
++                devices=-1,
++                strategy="ddp",
++                max_epochs=self.config.stage1_epochs,
++                log_every_n_steps=50
++            )
++            trainer.fit(module)
++            history = {"loss": trainer.callback_metrics.get("train_loss")}
++        else:
++            history = train_function(
++                network=self.stage1_network,
++                max_epochs=self.config.stage1_epochs,
++                target_loss=self.config.stage1_target_residual,
++                checkpoint_freq=self.config.checkpoint_frequency
++            )
+*** End Patch
+
+3. FSDP (Fully Sharded Data Parallel) 지원 옵션
+
+📍 파일: multistage_training.py
+
+*** Begin Patch
+*** Update File: multistage_training.py
+@@ class MultiStageTrainer:
+-        if getattr(self.config, "use_lightning", False):
++        if getattr(self.config, "use_fsdp", False):
++            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
++            self.stage1_network = FSDP(self.stage1_network)
++            logger.info("[Distributed] Using FSDP for Stage 1")
++            history = train_function(
++                network=self.stage1_network,
++                max_epochs=self.config.stage1_epochs,
++                target_loss=self.config.stage1_target_residual,
++                checkpoint_freq=self.config.checkpoint_frequency
++            )
++        elif getattr(self.config, "use_lightning", False):
+*** End Patch
+
+4. HuggingFace Accelerate 통합
+
+📍 파일: multistage_training.py
+
+*** Begin Patch
+*** Update File: multistage_training.py
+@@ class MultiStageTrainer:
+-        else:
+-            history = train_function(
+-                network=self.stage1_network,
+-                max_epochs=self.config.stage1_epochs,
+-                target_loss=self.config.stage1_target_residual,
+-                checkpoint_freq=self.config.checkpoint_frequency
+-            )
++        elif getattr(self.config, "use_accelerate", False):
++            from accelerate import Accelerator
++            accelerator = Accelerator()
++            self.stage1_network, optimizer1 = accelerator.prepare(
++                self.stage1_network, torch.optim.Adam(self.stage1_network.parameters(), lr=1e-3)
++            )
++            for epoch in range(self.config.stage1_epochs):
++                loss = train_function(
++                    network=self.stage1_network,
++                    max_epochs=1,
++                    target_loss=self.config.stage1_target_residual,
++                    checkpoint_freq=0
++                )
++                accelerator.print(f"[Accelerate] Epoch {epoch}, loss={loss}")
++            history = {"loss": loss}
++        else:
++            history = train_function(
++                network=self.stage1_network,
++                max_epochs=self.config.stage1_epochs,
++                target_loss=self.config.stage1_target_residual,
++                checkpoint_freq=self.config.checkpoint_frequency
++            )
+*** End Patch
+
+✅ Path #6 패치 세트 요약
+
+Lightning DDP 통합 → Trainer(strategy="ddp") 자동 분산
+
+FSDP 지원 → 초대규모 모델 메모리 최적화 학습
+
+Accelerate 지원 → CPU/GPU/TPU 자동 분산 관리

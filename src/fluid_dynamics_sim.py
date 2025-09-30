@@ -24,6 +24,9 @@ from scipy.interpolate import RegularGridInterpolator
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
+# Constants for numerical stability and algorithm parameters
+BLOWUP_TIME_ESTIMATE_OFFSET = 0.001  # Small offset for blow-up time estimation to avoid singularity
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -436,7 +439,9 @@ class SingularityDetector:
         magnitudes = [d['max_magnitude'] for d in recent_data]
 
         # Fit to (T-t)^(-λ) model
-        T_estimate = t + 0.001  # Rough estimate of blow-up time
+        # Use conservative estimate: blow-up occurs shortly after current time
+        # This offset prevents numerical issues when approaching exact blow-up time
+        T_estimate = t + BLOWUP_TIME_ESTIMATE_OFFSET
 
         try:
             # Linear regression in log space

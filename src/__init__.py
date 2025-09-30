@@ -14,7 +14,12 @@ from .unstable_singularity_detector import (
     SingularityType
 )
 from .pinn_solver import PINNSolver, PINNConfig
-from .gauss_newton_optimizer import GaussNewtonOptimizer
+from .gauss_newton_optimizer import (
+    HighPrecisionGaussNewton,
+    GaussNewtonOptimizer,
+    GaussNewtonConfig,
+    AdaptivePrecisionOptimizer
+)
 from .fluid_dynamics_sim import FluidDynamicsSimulator, SimulationConfig
 
 __all__ = [
@@ -24,6 +29,9 @@ __all__ = [
     "PINNSolver",
     "PINNConfig",
     "GaussNewtonOptimizer",
+    "HighPrecisionGaussNewton",
+    "GaussNewtonConfig",
+    "AdaptivePrecisionOptimizer",
     "FluidDynamicsSimulator",
     "SimulationConfig"
 ]

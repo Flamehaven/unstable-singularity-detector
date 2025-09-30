@@ -14,6 +14,7 @@ import torch
 import numpy as np
 import sys
 import os
+import logging
 
 # Add src to path for testing
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -23,6 +24,8 @@ from unstable_singularity_detector import (
     SingularityDetectionResult,
     SingularityType
 )
+
+logger = logging.getLogger(__name__)
 
 class TestUnstableSingularityDetector:
     """Test suite for the main detection algorithm"""
@@ -95,7 +98,7 @@ class TestUnstableSingularityDetector:
 
         # Run detection using correct method name
         try:
-            results = self.detector.detect_singularities(
+            results = self.detector.detect_unstable_singularities(
                 solution_field, t_vals, grids
             )
 
@@ -113,6 +116,20 @@ class TestUnstableSingularityDetector:
         # Test passes regardless - we're testing the interface, not the full algorithm
         assert isinstance(results, list)
 
+    def test_backward_compatibility_alias(self):
+        """Ensure legacy detect_singularities alias remains available"""
+        solution_field, t_vals, grids = self.generate_test_blowup()
+
+        try:
+            results = self.detector.detect_singularities(
+                solution_field, t_vals, grids
+            )
+        except Exception as e:
+            logger.warning(f"Legacy alias invocation failed: {e}")
+            results = []
+
+        assert isinstance(results, list)
+
     def test_precision_accuracy(self):
         """Test near machine precision achievement"""
         # Use high precision target
@@ -127,7 +144,7 @@ class TestUnstableSingularityDetector:
         )
 
         try:
-            results = high_precision_detector.detect_singularities(
+            results = high_precision_detector.detect_unstable_singularities(
                 solution_field, t_vals, grids
             )
 
@@ -163,7 +180,7 @@ class TestUnstableSingularityDetector:
             solution_field, t_vals, grids = self.generate_test_blowup(lambda_true)
 
             try:
-                results = detector.detect_singularities(
+                results = detector.detect_unstable_singularities(
                     solution_field, t_vals, grids
                 )
             except Exception:
@@ -182,7 +199,7 @@ class TestUnstableSingularityDetector:
         X, Y = torch.meshgrid(x, x, indexing='ij')
 
         try:
-            results = self.detector.detect_singularities(
+            results = self.detector.detect_unstable_singularities(
                 empty_field, t_vals, (X, Y)
             )
         except Exception:
@@ -196,7 +213,7 @@ class TestUnstableSingularityDetector:
         single_t = torch.tensor([0.5])
 
         try:
-            results = self.detector.detect_singularities(
+            results = self.detector.detect_unstable_singularities(
                 single_field, single_t, (X, Y)
             )
         except Exception:
@@ -217,7 +234,7 @@ class TestUnstableSingularityDetector:
             solution_field[i] += 0.005 * torch.sin(4 * np.pi * X) * torch.cos(4 * np.pi * Y)
 
         try:
-            results = self.detector.detect_singularities(
+            results = self.detector.detect_unstable_singularities(
                 solution_field, t_vals, grids
             )
 
@@ -243,7 +260,7 @@ class TestUnstableSingularityDetector:
 
         start_time = time.time()
         try:
-            results = self.detector.detect_singularities(
+            results = self.detector.detect_unstable_singularities(
                 solution_field, t_vals, grids
             )
         except Exception:

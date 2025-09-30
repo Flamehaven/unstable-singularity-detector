@@ -1,0 +1,116 @@
+🛠️ Path #2 — Patch Set 2 (3개 개선)
+1. Residual Tracker 시각화 추가
+
+📍 파일: multistage_training.py
+
+*** Begin Patch
+*** Update File: multistage_training.py
+@@ class MultiStageTrainer:
+     def train_stage2(self,
+                     residual: torch.Tensor,
+                     spatial_grid: torch.Tensor,
+                     train_function: Callable,
+                     validation_function: Callable) -> Dict:
+ 
+         logger.info("="*60)
+         logger.info("STAGE 2: High-Frequency Refinement")
+         logger.info("="*60)
++
++        # Residual tracker
++        residual_history = []
+ 
+         # Stage 2 network (Fourier PINN) with adaptive σ
+         if self.config.stage2_fourier_sigma is None:
+             dominant_freq = self.analyze_residual_frequency(residual, spatial_grid)
+             sigma = 2 * np.pi * dominant_freq
+             logger.info(f"[Adaptive σ] Using σ = {sigma:.4f} from residual analysis")
+         else:
+             sigma = self.config.stage2_fourier_sigma
+@@ class MultiStageTrainer:
+-        history = train_function(
++        history = train_function(
+             network=self.stage2_network,
+             max_epochs=self.config.stage2_epochs,
+             target_loss=self.config.stage2_target_residual,
+             checkpoint_freq=self.config.checkpoint_frequency
+         )
++
++        # Save residual tracker plot
++        import matplotlib.pyplot as plt
++        residual_history = history.get("loss", [])
++        if residual_history:
++            plt.semilogy(residual_history)
++            plt.title("Stage 2 Residual Convergence")
++            plt.xlabel("Epoch")
++            plt.ylabel("Residual Loss")
++            plt.savefig("stage2_residual_tracker.png", dpi=200)
++            logger.info("Saved residual tracker plot: stage2_residual_tracker.png")
+*** End Patch
+
+2. Rank-1 & EMA Hessian 혼합 선택 토글
+
+📍 파일: gauss_newton_optimizer_enhanced.py
+
+*** Begin Patch
+*** Update File: gauss_newton_optimizer_enhanced.py
+@@ class HighPrecisionGaussNewtonEnhanced:
+-    def _solve_gauss_newton_system(self, jacobian, residual):
+-        grad = jacobian.T @ residual
+-        JTJ = jacobian.T @ jacobian
+-        return torch.linalg.solve(JTJ + self.damping * torch.eye(JTJ.shape[0]), -grad)
++    def _solve_gauss_newton_system(self, jacobian, residual):
++        grad = jacobian.T @ residual
++
++        if getattr(self.config, "use_rank1_hessian", False):
++            Hv = self.rank1_estimator.estimate_hessian_vector_product(jacobian, grad)
++            logger.info("[Hessian] Using Rank-1 estimator")
++            return torch.linalg.solve(Hv + self.damping * torch.eye(Hv.shape[0]), -grad)
++
++        elif getattr(self.config, "use_ema_hessian", False):
++            self.ema_hessian.update(jacobian)
++            precond = self.ema_hessian.get_preconditioner(self.damping)
++            logger.info("[Hessian] Using EMA preconditioner")
++            return torch.linalg.solve(precond, -grad)
++
++        else:
++            JTJ = jacobian.T @ jacobian
++            logger.info("[Hessian] Using standard JTJ")
++            return torch.linalg.solve(JTJ + self.damping * torch.eye(JTJ.shape[0]), -grad)
+*** End Patch
+
+3. MLflow best-run 자동 연결
+
+📍 파일: experiment_tracker.py
+
+*** Begin Patch
+*** Update File: experiment_tracker.py
+@@ class ExperimentTracker:
+-    def get_best_run(self, metric_name: str, direction: str = "min") -> Optional[str]:
++    def get_best_run(self, metric_name: str, direction: str = "min", auto_link: bool = False) -> Optional[str]:
+         """Get the best run based on a metric
+ 
+         Args:
+             metric_name: Name of the metric to optimize
+             direction: 'min' or 'max'
++            auto_link: If True, set this run as the active context for next stage
+ 
+         Returns:
+             Best run ID or None
+         """
+         try:
+             experiment = mlflow.get_experiment(self.experiment_id)
+             runs = mlflow.search_runs(
+                 experiment_ids=[self.experiment_id],
+                 filter_string="",
+                 order_by=[f"metrics.{metric_name} {'ASC' if direction == 'min' else 'DESC'}"]
+             )
+ 
+             if not runs.empty:
+                 best_run_id = runs.iloc[0]['run_id']
+                 logger.info(f"Best run for {metric_name}: {best_run_id}")
+-                return best_run_id
++                if auto_link:
++                    self.active_run = self.client.get_run(best_run_id)
++                    logger.info(f"Linked best run {best_run_id} as active for next stage")
++                return best_run_id
+*** End Patch

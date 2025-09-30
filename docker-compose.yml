@@ -1,0 +1,119 @@
+version: '3.8'
+
+services:
+  # Main detector service
+  detector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: unstable-singularity-detector:1.0.0
+    container_name: singularity-detector
+
+    # GPU support (requires nvidia-docker)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    # Mount volumes for persistence
+    volumes:
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+      - ./checkpoints:/app/checkpoints
+      - ./data:/app/data
+
+    # Environment variables
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - TORCH_HOME=/app/.torch
+      - MPLCONFIGDIR=/app/.matplotlib
+      - PYTHONUNBUFFERED=1
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+
+    # Port mapping for web interface (Phase 3)
+    ports:
+      - "7860:7860"  # Gradio interface
+      - "5000:5000"  # MLflow tracking server
+
+    # Override default command
+    command: ["singularity-detect", "info"]
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import torch; import unstable_singularity_detector"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # MLflow tracking server (optional)
+  mlflow:
+    image: python:3.11-slim
+    container_name: mlflow-tracking
+
+    volumes:
+      - ./mlruns:/mlruns
+      - ./mlflow.db:/mlflow.db
+
+    ports:
+      - "5001:5000"
+
+    command: >
+      sh -c "pip install mlflow &&
+             mlflow server
+             --backend-store-uri sqlite:///mlflow.db
+             --default-artifact-root /mlruns
+             --host 0.0.0.0
+             --port 5000"
+
+    restart: unless-stopped
+
+  # Jupyter notebook server (optional development environment)
+  notebook:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: unstable-singularity-detector:1.0.0
+    container_name: singularity-notebook
+
+    volumes:
+      - ./:/app
+      - ./outputs:/app/outputs
+
+    ports:
+      - "8888:8888"
+
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - CUDA_VISIBLE_DEVICES=0
+
+    command: >
+      sh -c "pip install jupyterlab &&
+             jupyter lab
+             --ip=0.0.0.0
+             --port=8888
+             --no-browser
+             --allow-root
+             --NotebookApp.token=''
+             --NotebookApp.password=''"
+
+    restart: unless-stopped
+
+volumes:
+  outputs:
+  logs:
+  checkpoints:
+  data:
+  mlruns:
+
+networks:
+  default:
+    name: singularity-network
+    driver: bridge

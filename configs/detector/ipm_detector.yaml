@@ -10,10 +10,21 @@ confidence_threshold: 0.75
 max_instability_order: 10
 
 # IPM-specific parameters
+# Empirical formula from DeepMind paper (Figure 2e, page 5):
+# λₙ = 1/(1.1459·n + 0.9723)
 lambda_pattern:
-  slope: -0.125
-  intercept: 1.875
-  validation_tolerance: 0.05
+  formula_type: "inverse"  # λ = 1/(a·n + b) + c
+  a: 1.1459
+  b: 0.9723
+  c: 0.0
+  validation_tolerance: 0.02  # 2% relative error
+
+  # Reference values from paper (Table, page 4):
+  ground_truth:
+    stable: 1.0285722760222
+    unstable_1st: 0.4721297362414
+    unstable_2nd: 0.3149620267088
+    unstable_3rd: 0.2415604743989
 
 # Detection algorithm settings
 detection:

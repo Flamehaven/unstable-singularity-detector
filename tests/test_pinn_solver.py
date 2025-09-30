@@ -299,7 +299,7 @@ class TestIntegrationWithConfig:
 
     def test_solver_from_config(self):
         """Test creating solver from configuration"""
-        from config_manager import PINNConfig
+        from pinn_solver import PINNConfig
 
         # This would normally load from YAML
         config_dict = {

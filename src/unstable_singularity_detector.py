@@ -57,7 +57,8 @@ class UnstableSingularityDetector:
     def __init__(self,
                  equation_type: str = "euler_3d",
                  precision_target: float = 1e-14,
-                 max_instability_order: int = 10):
+                 max_instability_order: int = 10,
+                 confidence_threshold: float = 0.85):
         """
         Initialize the unstable singularity detector
 
@@ -65,29 +66,31 @@ class UnstableSingularityDetector:
             equation_type: Type of PDE ("euler_3d", "navier_stokes", "ipm", "boussinesq")
             precision_target: Target numerical precision (near machine precision)
             max_instability_order: Maximum instability order to analyze
+            confidence_threshold: Minimum confidence score for singularity detection
         """
         self.equation_type = equation_type
         self.precision_target = precision_target
         self.max_instability_order = max_instability_order
+        self.confidence_threshold = confidence_threshold
 
-        # Empirical lambda-instability pattern (from DeepMind discovery)
+        # Empirical lambda-instability pattern (from DeepMind paper Figure 2e)
+        # Formula: λₙ = 1/(a·n + b) + c where n is instability order
         self.lambda_pattern_coefficients = {
-            "ipm": {"slope": -0.125, "intercept": 1.875},  # IPM equation pattern
-            "boussinesq": {"slope": -0.098, "intercept": 1.654},  # Boussinesq pattern
-            "euler_3d": {"slope": -0.089, "intercept": 1.523}  # Extrapolated Euler pattern
+            "ipm": {"a": 1.1459, "b": 0.9723, "c": 0.0},  # IPM: λₙ = 1/(1.1459n + 0.9723)
+            "boussinesq": {"a": 1.4187, "b": 1.0863, "c": 1.0},  # Boussinesq: λₙ = 1/(1.4187n + 1.0863) + 1
+            "euler_3d": {"a": 1.4187, "b": 1.0863, "c": 1.0}  # Euler (analogous to Boussinesq)
         }
 
         # Detection thresholds
         self.stability_threshold = 1e-12
-        self.confidence_threshold = 0.85
 
         logger.info(f"Initialized UnstableSingularityDetector for {equation_type}")
         logger.info(f"Target precision: {precision_target:.2e}")
 
-    def detect_singularities(self,
-                           solution_field: torch.Tensor,
-                           time_evolution: torch.Tensor,
-                           spatial_grid: torch.Tensor) -> List[SingularityDetectionResult]:
+    def detect_unstable_singularities(self,
+                                      solution_field: torch.Tensor,
+                                      time_evolution: torch.Tensor,
+                                      spatial_grid: torch.Tensor) -> List[SingularityDetectionResult]:
         """
         Main detection pipeline for unstable singularities
 
@@ -125,6 +128,9 @@ class UnstableSingularityDetector:
 
         logger.info(f"Detection complete: {len(validated_singularities)} validated singularities")
         return validated_singularities
+
+    # Backwards compatibility with earlier API naming
+    detect_singularities = detect_unstable_singularities
 
     def _scan_blowup_candidates(self,
                               solution_field: torch.Tensor,
@@ -234,6 +240,10 @@ class UnstableSingularityDetector:
         values = time_series.numpy()
 
         # Assume self-similar blow-up: u(x,t) ~ (T-t)^(-λ) * F(x/(T-t)^α)
+        # ALGORITHM ASSUMPTION: Blow-up occurs shortly after the last observed time point
+        # This is a conservative estimate that works well for data approaching singularity
+        # For more accurate blow-up time estimation, consider using global optimization,
+        # Richardson extrapolation, or other advanced techniques based on solution behavior
         T_blowup = times[-1] + 1e-6  # Estimated blow-up time
 
         def lambda_objective(lam):
@@ -399,6 +409,32 @@ class UnstableSingularityDetector:
             logger.warning(f"Residual computation failed: {e}")
             return 1.0
 
+    def predict_next_unstable_lambda(self, current_order: int) -> float:
+        """
+        Predict λ value for next unstable mode using DeepMind empirical formula
+
+        Paper formula (Figure 2e, page 5):
+        - Boussinesq/Euler: λₙ = 1/(1.4187·n + 1.0863) + 1
+        - IPM with boundary: λₙ = 1/(1.1459·n + 0.9723)
+
+        Args:
+            current_order: Current instability order n
+
+        Returns:
+            Predicted lambda value for order n+1
+        """
+        if self.equation_type not in self.lambda_pattern_coefficients:
+            raise ValueError(f"No pattern formula for equation type: {self.equation_type}")
+
+        pattern = self.lambda_pattern_coefficients[self.equation_type]
+        next_order = current_order + 1
+
+        # Apply inverse relationship: λ = 1/(a·n + b) + c
+        lambda_pred = 1.0 / (pattern["a"] * next_order + pattern["b"]) + pattern["c"]
+
+        logger.info(f"Predicted λ for order {next_order}: {lambda_pred:.10f}")
+        return lambda_pred
+
     def _validate_against_patterns(self,
                                  singularities: List[SingularityDetectionResult]) -> List[SingularityDetectionResult]:
         """
@@ -412,8 +448,8 @@ class UnstableSingularityDetector:
         validated = []
 
         for sing in singularities:
-            # Check if lambda matches expected pattern
-            expected_lambda = pattern["slope"] * sing.instability_order + pattern["intercept"]
+            # Check if lambda matches expected pattern using inverse formula
+            expected_lambda = 1.0 / (pattern["a"] * sing.instability_order + pattern["b"]) + pattern["c"]
             lambda_error = abs(sing.lambda_value - expected_lambda)
 
             # Adjust confidence based on pattern matching
@@ -455,9 +491,10 @@ class UnstableSingularityDetector:
         # Add theoretical pattern line if available
         if self.equation_type in self.lambda_pattern_coefficients:
             pattern = self.lambda_pattern_coefficients[self.equation_type]
-            order_range = np.linspace(0, max(orders) + 1, 100)
-            theory_line = pattern["slope"] * order_range + pattern["intercept"]
-            ax1.plot(order_range, theory_line, 'r--', alpha=0.8, label='Theoretical Pattern')
+            order_range = np.linspace(0.1, max(orders) + 1, 100)  # Avoid division by zero
+            # Use inverse formula: λ = 1/(a·n + b) + c
+            theory_line = 1.0 / (pattern["a"] * order_range + pattern["b"]) + pattern["c"]
+            ax1.plot(order_range, theory_line, 'r--', alpha=0.8, label='DeepMind Empirical Formula')
             ax1.legend()
 
         # 2. Precision vs Confidence
@@ -537,7 +574,7 @@ if __name__ == "__main__":
     print("Running unstable singularity detection...")
 
     # Run detection
-    results = detector.detect_singularities(solution_field, time_evolution, spatial_grid)
+    results = detector.detect_unstable_singularities(solution_field, time_evolution, spatial_grid)
 
     print(f"\nDetection Results:")
     print(f"Number of singularities found: {len(results)}")

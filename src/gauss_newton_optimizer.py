@@ -286,8 +286,13 @@ class HighPrecisionGaussNewton:
             # Solve linear system
             step = torch.linalg.solve(damped_JTJ, -JTr)
             return step
+        except torch.linalg.LinAlgError as e:
+            logger.warning(f"Linear algebra error (singular matrix): {e}")
+            # Fallback to gradient descent step when matrix is singular
+            gradient = self._compute_gradient(residual, jacobian)
+            return -self.config.learning_rate * gradient
         except RuntimeError as e:
-            logger.warning(f"Linear system solve failed: {e}")
+            logger.warning(f"General runtime error in linear system solve: {e}")
             # Fallback to gradient descent step
             gradient = self._compute_gradient(residual, jacobian)
             return -self.config.learning_rate * gradient
@@ -514,6 +519,9 @@ class HighPrecisionGaussNewton:
             logger.info(f"Convergence plot saved to {save_path}")
 
         plt.show()
+
+GaussNewtonOptimizer = HighPrecisionGaussNewton
+
 
 class AdaptivePrecisionOptimizer:
     """

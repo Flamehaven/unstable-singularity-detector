@@ -174,9 +174,29 @@ cython_debug/
 *.pkl
 *.pickle
 checkpoints/
+checkpoint_*.pt
 results/
 outputs/
 logs/
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Generated reports
+*.html
+*.vtk
+*.pdf
+analysis.ipynb
+experiment_summary.md
+lambda_timeseries.json
+
+# Patch documentation backups
+*.md.backup
+
+# Test artifacts
+test_checkpoint.pt
+stage2_residual_tracker.png
 
 # Temporary files
 *.tmp

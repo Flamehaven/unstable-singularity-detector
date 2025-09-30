@@ -111,7 +111,7 @@ def main():
         max_instability_order=5
     )
 
-    results = detector.detect_singularities(
+    results = detector.detect_unstable_singularities(
         solution_field, time_evolution, spatial_grid
     )
 

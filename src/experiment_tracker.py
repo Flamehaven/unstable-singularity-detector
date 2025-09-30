@@ -406,12 +406,13 @@ class ExperimentTracker:
 
         return comparison_data
 
-    def get_best_run(self, metric_name: str, direction: str = "min") -> Optional[str]:
+    def get_best_run(self, metric_name: str, direction: str = "min", auto_link: bool = False) -> Optional[str]:
         """Get the best run based on a metric
 
         Args:
             metric_name: Name of the metric to optimize
             direction: 'min' or 'max'
+            auto_link: If True, set this run as the active context for next stage (Patch #2.3)
 
         Returns:
             Best run ID or None
@@ -427,6 +428,12 @@ class ExperimentTracker:
             if not runs.empty:
                 best_run_id = runs.iloc[0]['run_id']
                 logger.info(f"Best run for {metric_name}: {best_run_id}")
+
+                # Auto-link best run as active (Patch #2.3)
+                if auto_link:
+                    self.active_run = self.client.get_run(best_run_id)
+                    logger.info(f"[Auto-Link] Linked best run {best_run_id} as active for next stage")
+
                 return best_run_id
 
         except Exception as e:
@@ -441,6 +448,290 @@ class ExperimentTracker:
             for file_path in temp_dir.iterdir():
                 file_path.unlink()
             temp_dir.rmdir()
+
+    # Patch #7.2: Config Hash Tracking
+    def log_config_hash(self, cfg: dict):
+        """
+        Log SHA1 hash of the config dict for reproducibility
+
+        Args:
+            cfg: Configuration dictionary
+        """
+        import hashlib
+        import json
+
+        cfg_str = json.dumps(cfg, sort_keys=True)
+        cfg_hash = hashlib.sha1(cfg_str.encode()).hexdigest()
+
+        self.client.log_param(self.active_run.info.run_id, "config_hash", cfg_hash)
+        logger.info(f"[Config] Logged config hash={cfg_hash[:8]}")
+
+        return cfg_hash
+
+    # Patch #7.3: Run Provenance
+    def log_provenance(self):
+        """
+        Log code + environment provenance (git commit, hostname, seed)
+        """
+        import subprocess
+        import socket
+        import random
+
+        # Git commit
+        try:
+            commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                stderr=subprocess.DEVNULL
+            ).decode().strip()
+        except Exception:
+            commit = "unknown"
+
+        # Hostname
+        hostname = socket.gethostname()
+
+        # Random seed (set and log)
+        seed = random.randint(0, 10**6)
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+        # Log all provenance info
+        self.client.log_param(self.active_run.info.run_id, "git_commit", commit)
+        self.client.log_param(self.active_run.info.run_id, "hostname", hostname)
+        self.client.log_param(self.active_run.info.run_id, "random_seed", seed)
+
+        logger.info(f"[Provenance] commit={commit[:8]}, host={hostname}, seed={seed}")
+
+        return {"commit": commit, "hostname": hostname, "seed": seed}
+
+    # Patch #9.4: Markdown Summary
+    def summarize_run(self, run_id: str = None, output_file: str = "experiment_summary.md"):
+        """
+        Generate Markdown summary of experiment
+
+        Args:
+            run_id: MLflow run ID (if None, use active run)
+            output_file: Output markdown file path
+        """
+        if run_id is None:
+            if self.active_run is None:
+                logger.error("No active run and no run_id provided")
+                return
+            run_id = self.active_run.info.run_id
+
+        run = self.client.get_run(run_id)
+        params = run.data.params
+        metrics = run.data.metrics
+
+        # Generate markdown
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(f"# Experiment Summary\n\n")
+            f.write(f"**Run ID**: {run_id}\n")
+            f.write(f"**Run Name**: {run.info.run_name}\n")
+            f.write(f"**Start Time**: {datetime.fromtimestamp(run.info.start_time/1000).strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"**Status**: {run.info.status}\n\n")
+
+            f.write("## Parameters\n\n")
+            for k, v in sorted(params.items()):
+                f.write(f"- **{k}**: {v}\n")
+
+            f.write("\n## Metrics\n\n")
+            for k, v in sorted(metrics.items()):
+                f.write(f"- **{k}**: {v}\n")
+
+            f.write("\n---\n")
+            f.write(f"*Generated*: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+        logger.info(f"[Summary] Markdown summary saved to {output_file}")
+        return output_file
+
+    def track_dataset(self, dataset_path: str):
+        """
+        Track dataset version using hash (compatible with DVC/Git) (Patch #7.1)
+
+        Args:
+            dataset_path: Path to dataset file to track
+
+        Returns:
+            SHA1 hash of the dataset
+        """
+        if self.active_run is None:
+            logger.error("No active run. Call start_run() first.")
+            return None
+
+        try:
+            import hashlib
+
+            BUF_SIZE = 65536
+            sha1 = hashlib.sha1()
+
+            with open(dataset_path, "rb") as f:
+                while True:
+                    data = f.read(BUF_SIZE)
+                    if not data:
+                        break
+                    sha1.update(data)
+
+            dataset_hash = sha1.hexdigest()
+
+            self.client.log_param(self.active_run.info.run_id, "dataset_path", dataset_path)
+            self.client.log_param(self.active_run.info.run_id, "dataset_hash", dataset_hash)
+
+            logger.info(f"[Dataset] Tracked {dataset_path} with hash={dataset_hash[:8]}...")
+            return dataset_hash
+
+        except FileNotFoundError:
+            logger.error(f"[Dataset] File not found: {dataset_path}")
+            return None
+        except Exception as e:
+            logger.error(f"[Dataset] Failed to track: {e}")
+            return None
+
+    def replay_metadata(self, run_id: str):
+        """
+        Rebuild experiment setup from logged metadata (Patch #7.4)
+
+        Args:
+            run_id: MLflow run ID to replay
+
+        Returns:
+            Dictionary of run parameters
+        """
+        try:
+            run = self.client.get_run(run_id)
+            params = run.data.params
+
+            logger.info(f"[Replay Metadata] Run {run_id}")
+            logger.info("[Replay Metadata] Run parameters:")
+            for k, v in params.items():
+                logger.info(f"  {k}: {v}")
+
+            return params
+
+        except Exception as e:
+            logger.error(f"[Replay Metadata] Failed: {e}")
+            return {}
+
+    def export_notebook(self, run_id: str, filename: str = "analysis.ipynb"):
+        """
+        Generate Jupyter notebook with experiment analysis cells (Patch #9.3)
+
+        Args:
+            run_id: MLflow run ID
+            filename: Output notebook file path
+
+        Returns:
+            Path to generated notebook
+        """
+        try:
+            import nbformat as nbf
+
+            run = self.client.get_run(run_id)
+            params = run.data.params
+            metrics = run.data.metrics
+
+            # Create new notebook
+            nb = nbf.v4.new_notebook()
+
+            # Title cell
+            nb.cells.append(nbf.v4.new_markdown_cell(
+                f"# Experiment Analysis Notebook\n\n"
+                f"**Run ID**: `{run_id}`\n\n"
+                f"**Status**: {run.info.status}\n\n"
+                f"Generated automatically from MLflow tracking."
+            ))
+
+            # Parameters cell
+            params_code = "# Experiment Parameters\n"
+            params_code += f"params = {params}\n"
+            params_code += "print('Parameters:')\n"
+            params_code += "for k, v in params.items():\n"
+            params_code += "    print(f'  {k}: {v}')"
+            nb.cells.append(nbf.v4.new_code_cell(params_code))
+
+            # Metrics cell
+            metrics_code = "# Experiment Metrics\n"
+            metrics_code += f"metrics = {metrics}\n"
+            metrics_code += "print('Metrics:')\n"
+            metrics_code += "for k, v in metrics.items():\n"
+            metrics_code += "    print(f'  {k}: {v}')"
+            nb.cells.append(nbf.v4.new_code_cell(metrics_code))
+
+            # Visualization template
+            viz_code = """# Custom Analysis and Visualization
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Add your custom plots here
+# Example:
+# plt.figure(figsize=(10, 6))
+# plt.plot(residual_history)
+# plt.yscale('log')
+# plt.title('Convergence')
+# plt.show()"""
+            nb.cells.append(nbf.v4.new_code_cell(viz_code))
+
+            # Write notebook
+            with open(filename, "w", encoding="utf-8") as f:
+                nbf.write(nb, f)
+
+            logger.info(f"[Notebook Export] Jupyter notebook saved to {filename}")
+            return filename
+
+        except ImportError:
+            logger.error("[Notebook Export] nbformat not installed. Install: pip install nbformat")
+            return None
+        except Exception as e:
+            logger.error(f"[Notebook Export] Failed: {e}")
+            return None
+
+    def track_lambda_timeseries(self, lambdas: list, timestamps: list = None):
+        """
+        Track lambda instability values over time (Phase C - Interactive λ analysis)
+
+        Args:
+            lambdas: List of lambda values
+            timestamps: Optional list of timestamps (if None, uses indices)
+        """
+        if self.active_run is None:
+            logger.error("No active run. Call start_run() first.")
+            return
+
+        try:
+            import numpy as np
+
+            if timestamps is None:
+                timestamps = list(range(len(lambdas)))
+
+            # Log statistics
+            lambda_stats = {
+                "lambda_mean": float(np.mean(lambdas)),
+                "lambda_std": float(np.std(lambdas)),
+                "lambda_min": float(np.min(lambdas)),
+                "lambda_max": float(np.max(lambdas)),
+                "lambda_count": len(lambdas)
+            }
+
+            self.log_metrics(lambda_stats)
+
+            # Log timeseries data
+            lambda_data = {
+                "timestamps": timestamps,
+                "lambdas": lambdas,
+                "statistics": lambda_stats
+            }
+
+            self.log_data_artifact(
+                lambda_data,
+                "lambda_timeseries.json",
+                artifact_path="lambda_analysis",
+                format="json"
+            )
+
+            logger.info(f"[Lambda Tracker] Logged {len(lambdas)} lambda values")
+            logger.info(f"[Lambda Tracker] Mean={lambda_stats['lambda_mean']:.4f}, Std={lambda_stats['lambda_std']:.4f}")
+
+        except Exception as e:
+            logger.error(f"[Lambda Tracker] Failed: {e}")
 
 # Context manager for automatic run management
 class MLflowRunContext:

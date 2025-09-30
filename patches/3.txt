@@ -1,0 +1,112 @@
+🛠️ Path #3 — Patch Set 3 (보완 개선)
+1. Mixed Precision (AMP) 지원
+
+📍 파일: multistage_training.py
+
+*** Begin Patch
+*** Update File: multistage_training.py
+@@ class MultiStageTrainer:
+-        history = train_function(
+-            network=self.stage1_network,
+-            max_epochs=self.config.stage1_epochs,
+-            target_loss=self.config.stage1_target_residual,
+-            checkpoint_freq=self.config.checkpoint_frequency
+-        )
++        scaler = torch.cuda.amp.GradScaler(enabled=(self.device.type == "cuda"))
++        history = train_function(
++            network=self.stage1_network,
++            max_epochs=self.config.stage1_epochs,
++            target_loss=self.config.stage1_target_residual,
++            checkpoint_freq=self.config.checkpoint_frequency,
++            use_amp=True,
++            scaler=scaler
++        )
+*** End Patch
+
+2. Adaptive Sampling (Residual 기반)
+
+📍 파일: pinn_solver.py
+
+*** Begin Patch
+*** Update File: pinn_solver.py
+@@ class PINNSolver:
+-    def sample_training_points(self, n_interior, n_boundary):
+-        # Uniform random sampling
+-        x_int = torch.rand(n_interior, self.dim, dtype=self.dtype, device=self.device)
+-        x_bnd = torch.rand(n_boundary, self.dim, dtype=self.dtype, device=self.device)
+-        return x_int, x_bnd
++    def sample_training_points(self, n_interior, n_boundary, residual_map=None):
++        if residual_map is None:
++            # Uniform random sampling
++            x_int = torch.rand(n_interior, self.dim, dtype=self.dtype, device=self.device)
++        else:
++            # Importance sampling proportional to residual
++            probs = torch.abs(residual_map).flatten()
++            probs = probs / probs.sum()
++            idx = torch.multinomial(probs, n_interior, replacement=True)
++            x_int = residual_map[idx]
++        x_bnd = torch.rand(n_boundary, self.dim, dtype=self.dtype, device=self.device)
++        return x_int, x_bnd
+*** End Patch
+
+3. VTK Export (논문급 시각화 지원)
+
+📍 파일: visualization_enhanced.py
+
+*** Begin Patch
+*** Update File: visualization_enhanced.py
+@@
+ import matplotlib.pyplot as plt
++import meshio
++
++def export_to_vtk(filename, coords, u_pred):
++    """Export PINN solution to VTK for Paraview visualization"""
++    points = coords.detach().cpu().numpy()
++    values = u_pred.detach().cpu().numpy()
++    cells = [("vertex", np.arange(len(points)).reshape(-1, 1))]
++    meshio.write_points_cells(
++        filename,
++        points,
++        cells,
++        point_data={"u": values}
++    )
++    print(f"[VTK Export] Saved solution to {filename}")
+*** End Patch
+
+4. Hydra Sweep & Auto CLI Docs
+
+📍 파일: cli.py
+
+*** Begin Patch
+*** Update File: cli.py
+@@
+ import argparse
++import hydra
++from omegaconf import DictConfig
++import typer
++
++app = typer.Typer(help="Unstable Singularity Detector CLI")
++
++@app.command()
++def train(cfg: DictConfig):
++    """Train PINN or Multi-stage model"""
++    print(f"[CLI] Training equation={cfg.equation}, resume={cfg.resume}")
++
++@app.command()
++def detect(cfg: DictConfig):
++    """Run singularity detection"""
++    print(f"[CLI] Detecting singularities for equation={cfg.equation}")
++
++if __name__ == "__main__":
++    app()
+*** End Patch
+
+✅ Path #3 패치 세트 요약
+
+AMP Mixed Precision → Stage 1에서 GPU 속도 최적화
+
+Adaptive Sampling → Residual 기반 중요도 샘플링
+
+VTK Export → Paraview/논문급 시각화 지원
+
+Hydra + Typer CLI → --equation, --resume, --output-dir 문서화/스위프 지원

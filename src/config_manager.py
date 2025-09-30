@@ -8,8 +8,8 @@ Supports YAML configs with command-line overrides for maximum flexibility.
 
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
-from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Union
+from dataclasses import dataclass, field
 import logging
 from omegaconf import DictConfig, OmegaConf
 import hydra
@@ -26,7 +26,7 @@ class ExperimentConfig:
     version: str = "1.0.0"
     author: str = "Flamehaven Research"
     description: str = "DeepMind fluid dynamics implementation"
-    tags: list = None
+    tags: List[str] = field(default_factory=list)
 
 @dataclass
 class GlobalConfig:
