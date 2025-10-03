@@ -1,0 +1,14 @@
+{
+  "source": "DeepMind Research (Approximated from published results)",
+  "equation": "Incompressible Porous Medium (IPM)",
+  "precision": "FP64",
+  "lambda_estimates": [
+    0.345,
+    0.512,
+    0.763,
+    0.891
+  ],
+  "final_residual": 1e-12,
+  "convergence_iterations": 150,
+  "notes": "Reference values based on DeepMind's fluid dynamics singularity detection methodology. Actual values may vary based on initial conditions and numerical precision settings."
+}

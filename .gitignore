@@ -175,7 +175,8 @@ cython_debug/
 *.pickle
 checkpoints/
 checkpoint_*.pt
-results/
+results/plots/
+results/*.png
 outputs/
 logs/
 
