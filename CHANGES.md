@@ -1,5 +1,110 @@
 # Changelog - DeepMind Paper Implementation Updates
 
+## [2025-10-03] Torch Shim Utility with Bug Fixes
+
+### Added: Reference Implementation for Testing
+
+**Motivation**: Provide reference implementations for understanding PyTorch edge case behavior without requiring full PyTorch installation in test environments.
+
+**New Components**:
+
+1. **Torch Shim Utility** (`src/utils/torch_shim.py`)
+   - Minimal tensor implementation for testing
+   - Fixed `arange()` function with proper edge case handling
+   - Fixed `abs()` recursion bug
+   - **NOT for production use** - real PyTorch required
+
+2. **Comprehensive Test Suite** (`tests/test_torch_shim.py`)
+   - 20 tests covering edge cases
+   - 100% pass rate
+   - Validates PyTorch behavior compatibility
+
+3. **Documentation** (`docs/TORCH_SHIM_README.md`)
+   - Usage guidelines and limitations
+   - API reference
+   - Migration guide
+
+### Bug Fixes
+
+#### 1. `arange()` Edge Case Handling
+
+**Fixed Issues**:
+- ❌ **Before**: `step=0` caused infinite loop
+- ✅ **After**: Raises `ValueError` (matches PyTorch)
+- ❌ **Before**: Negative steps didn't work
+- ✅ **After**: Supports descending sequences with `step < 0`
+
+**Implementation**:
+```python
+# Added step=0 validation
+if step == 0:
+    raise ValueError("step must be non-zero")
+
+# Sign-aware loop for ascending/descending
+if step > 0:
+    while current < end:  # Ascending
+        values.append(current)
+        current += step
+else:
+    while current > end:  # Descending
+        values.append(current)
+        current += step
+```
+
+**Test Coverage**:
+- ✅ Positive step (ascending): `arange(0, 5, 1)` → `[0, 1, 2, 3, 4]`
+- ✅ Negative step (descending): `arange(5, 0, -1)` → `[5, 4, 3, 2, 1]`
+- ✅ Zero step: `arange(0, 5, 0)` → `ValueError`
+- ✅ Empty ranges, fractional steps, single elements
+
+#### 2. `abs()` Infinite Recursion Bug
+
+**Fixed Issue**:
+- ❌ **Before**: `Tensor.abs()` method called itself → infinite recursion
+- ✅ **After**: Properly delegates to `builtins.abs()`
+
+**Root Cause**:
+```python
+# WRONG (infinite recursion)
+def abs(self) -> "Tensor":
+    return abs(self)  # Calls itself!
+
+# CORRECT (fixed)
+def abs(self) -> "Tensor":
+    return abs_tensor(self)  # Delegates to module function
+```
+
+**Solution**:
+- Created separate `abs_tensor()` module function
+- Method delegates to avoid name collision with builtins
+- `__abs__()` magic method works correctly
+
+### Important Notes
+
+**⚠️ This is NOT a PyTorch replacement**:
+- Use actual PyTorch (torch==2.4.0) for all production code
+- Shim is for testing edge cases only
+- No gradients, no GPU, limited precision
+- See `docs/TORCH_SHIM_README.md` for full limitations
+
+### Testing
+
+Run tests:
+```bash
+pytest tests/test_torch_shim.py -v
+```
+
+**Results**: ✅ 20 passed in 4.90s
+
+### Impact
+
+- **Testing**: Enables edge case validation without PyTorch
+- **Documentation**: Clear reference for expected behavior
+- **Bug Prevention**: Validates step=0 and recursion edge cases
+- **Production**: No impact (real PyTorch still required)
+
+---
+
 ## [2025-10-03] Reproducibility Validation Infrastructure (Patch 14)
 
 ### Added: External Validation Framework
