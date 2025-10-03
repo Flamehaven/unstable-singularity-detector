@@ -206,6 +206,14 @@ PATCH_*
 ALL_PATCHES_*
 test_*_patches.*
 
+# Internal completion reports and phase documentation
+PROJECT_COMPLETION_REPORT.md
+*_COMPLETION_REPORT.md
+PHASE_*_COMPLETE.md
+IMPLEMENTATION_COMPLETE.md
+GITHUB_DEPLOYMENT_COMPLETE.md
+GITHUB_SETUP.md
+
 # Test artifacts
 test_checkpoint.pt
 stage2_residual_tracker.png
