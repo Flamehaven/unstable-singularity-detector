@@ -7,9 +7,11 @@
 [![Version](https://img.shields.io/badge/version-1.3.0-blue)](CHANGELOG.md)
 [![Patches](https://img.shields.io/badge/patches-16%2F27%20applied-success)](ALL_PATCHES_COMPLETE.md)
 
-**Complete implementation of DeepMind's breakthrough in detecting unstable singularities in fluid dynamics**
+**Open re-implementation of unstable singularity detection inspired by DeepMind research**
 
-Based on the groundbreaking paper ["Discovering new solutions to century-old problems in fluid dynamics"](https://arxiv.org/abs/2509.14185) ([blog post](https://deepmind.google/discover/blog/discovering-new-solutions-to-century-old-problems-in-fluid-dynamics/)), this repository provides a production-ready implementation of Physics-Informed Neural Networks (PINNs) achieving **machine precision** (< 10⁻¹³) for detecting unstable blow-up solutions.
+Based on the paper ["Discovering new solutions to century-old problems in fluid dynamics"](https://arxiv.org/abs/2509.14185) ([blog post](https://deepmind.google/discover/blog/discovering-new-solutions-to-century-old-problems-in-fluid-dynamics/)), this repository provides an open-source implementation of Physics-Informed Neural Networks (PINNs) for detecting unstable blow-up solutions in fluid dynamics.
+
+⚠️ **Research Implementation**: This is an independent implementation for research and educational purposes. Results are validated where noted; see [REPRODUCTION.md](docs/REPRODUCTION.md) for detailed benchmarks and comparisons.
 
 **NEW in v1.3.0**: 16 performance patches applied - 2.3x speedup, 100% reproducibility, complete automation!
 
@@ -18,13 +20,13 @@ Based on the groundbreaking paper ["Discovering new solutions to century-old pro
 ## ✨ Key Features
 
 ### Core Capabilities
-🎯 **Unstable Singularity Detection** - First systematic detection of unstable blow-up solutions
-🔬 **Machine Precision** - Achieves 10⁻¹³ residual accuracy (computer-assisted proof ready)
+🎯 **Unstable Singularity Detection** - Systematic detection of unstable blow-up solutions
+🔬 **High Precision Training** - Targets 10⁻¹³ residual accuracy using multi-stage refinement
 ⚡ **Enhanced Gauss-Newton** - Rank-1 Hessian + EMA for memory-efficient optimization
-🌀 **Multi-stage Training** - Stage 1 (10⁻⁸) → Stage 2 (10⁻¹³) for extreme precision
+🌀 **Multi-stage Training** - Progressive refinement: 10⁻⁸ → 10⁻¹³ via Fourier features
 🔍 **Funnel Inference** - Automatic lambda parameter discovery via secant method
-📊 **Lambda Prediction** - Empirical formulas: λₙ = 1/(a·n + b) + c
-🌊 **3D Fluid Simulation** - Real-time Euler/Navier-Stokes solver with spectral methods
+📊 **Lambda Prediction** - Empirical formulas validated against paper benchmarks
+🌊 **3D Fluid Simulation** - Euler/Navier-Stokes solver with spectral methods
 
 ### Performance Enhancements (v1.3.0 - 16 Patches Applied)
 🚀 **2.3x Training Speedup** - Early stopping (30%) + GPU AMP (2x)
@@ -44,7 +46,7 @@ See [ALL_PATCHES_COMPLETE.md](ALL_PATCHES_COMPLETE.md) for full details.
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/unstable-singularity-detector.git
+git clone https://github.com/Flamehaven/unstable-singularity-detector.git
 cd unstable-singularity-detector
 
 # Build Docker image
@@ -64,7 +66,7 @@ run.bat     # Windows
 ### Option 2: Local Installation
 
 ```bash
-git clone https://github.com/yourusername/unstable-singularity-detector.git
+git clone https://github.com/Flamehaven/unstable-singularity-detector.git
 cd unstable-singularity-detector
 pip install -r requirements.txt
 pip install -e .
@@ -311,35 +313,40 @@ SKIPPED: CUDA not available (expected on CPU-only systems)
 
 ---
 
-## 🔬 Scientific Validation
+## 🔬 Validation Results
 
-### Lambda Prediction Accuracy (vs DeepMind Ground Truth)
+### Lambda Prediction Accuracy
 
-| Equation | Order | Paper Value | Our Prediction | Error |
-|----------|-------|-------------|----------------|-------|
-| **IPM** | Stable | 1.0285722760222 | 1.0285722760222 | 0.00% ✅ |
-| IPM | 1st Unstable | 0.4721297362414 | 0.4721321502 | 0.005% ✅ |
-| **Boussinesq** | Stable | 2.4142135623731 | 2.4142135623731 | 0.00% ✅ |
-| Boussinesq | 1st Unstable | 1.7071067811865 | 1.7071102862 | 0.002% ✅ |
+Lambda predictions are validated against empirical formulas from the paper:
 
-### Machine Precision Achievement
+| Equation | Order | Reference Formula Result | Our Prediction | Relative Error |
+|----------|-------|-------------------------|----------------|---------------|
+| **IPM** | Stable | 1.0285722760222 | 1.0285722760222 | <0.001% ✅ |
+| IPM | 1st Unstable | 0.4721297362414 | 0.4721321502 | ~0.005% ✅ |
+| **Boussinesq** | Stable | 2.4142135623731 | 2.4142135623731 | <0.001% ✅ |
+| Boussinesq | 1st Unstable | 1.7071067811865 | 1.7071102862 | ~0.002% ✅ |
+
+📝 **Note**: These values are computed using empirical formulas from the paper, not direct comparison with DeepMind's numerical results. For full numerical reproduction, see [REPRODUCTION.md](docs/REPRODUCTION.md).
+
+### Optimizer Performance (Test Problem)
 
 ```python
-# Gauss-Newton test on quadratic problem
+# Gauss-Newton test on quadratic optimization problem
 Initial loss: 2.04e+02
-Final loss:   9.17e-13  ← Machine precision! (< 10⁻¹²)
+Final loss:   9.17e-13  (demonstrates high-precision capability)
 Iterations:   53
 Time:         0.15s
 ```
 
-### Multi-stage Improvement
+### Training Pipeline Results
 
 ```
-Single-stage (Adam, 10k epochs):  residual ~ 10⁻⁷
-Multi-stage (Stage 1 + Stage 2):  residual ~ 10⁻¹²
-With Gauss-Newton (Stage 3):     residual ~ 10⁻¹³
+Stage 1 (Adam, 50k epochs):       target residual ~ 10⁻⁸
+Stage 2 (Fourier + Adam):         target residual ~ 10⁻¹²
+Stage 3 (Gauss-Newton polish):    target residual ~ 10⁻¹³
 
-Improvement: 1,000,000× better precision!
+Note: Actual residuals achieved depend on problem complexity,
+grid resolution, and hardware precision (FP32/FP64/FP128).
 ```
 
 ---
@@ -504,7 +511,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ### Development Setup
 
 ```bash
-git clone https://github.com/yourusername/unstable-singularity-detector.git
+git clone https://github.com/Flamehaven/unstable-singularity-detector.git
 cd unstable-singularity-detector
 pip install -e ".[dev]"
 pre-commit install
@@ -538,10 +545,10 @@ If you use this code in your research, please cite:
 }
 
 @software{unstable_singularity_detector,
-  title={Unstable Singularity Detector: Complete Implementation of DeepMind's Breakthrough},
+  title={Unstable Singularity Detector: Open Re-implementation of Unstable Singularity Detection},
   author={Flamehaven},
   year={2024},
-  url={https://github.com/yourusername/unstable-singularity-detector}
+  url={https://github.com/Flamehaven/unstable-singularity-detector}
 }
 ```
 

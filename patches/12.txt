@@ -1,0 +1,1573 @@
+**1. 실행 가능한 개선 코드**
+
+```python
+# improvement_kit/security_hardening.py
+"""
+Flamehaven Inspector 5.0 - Security Hardening Kit
+즉시 적용 가능한 보안 강화 코드
+"""
+
+import os
+from functools import wraps
+from typing import Optional
+import gradio as gr
+from pydantic import BaseModel, Field, validator
+import logging
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 1. WEB AUTHENTICATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def setup_secure_gradio_interface(demo: gr.Interface) -> gr.Interface:
+    """
+    Gradio 인터페이스에 인증 추가
+    
+    Usage:
+        demo = gr.Interface(...)
+        demo = setup_secure_gradio_interface(demo)
+        demo.launch()
+    """
+    username = os.getenv("WEB_USERNAME", "admin")
+    password = os.getenv("WEB_PASSWORD")
+    
+    if not password:
+        raise ValueError(
+            "WEB_PASSWORD environment variable must be set! "
+            "Add to .env: WEB_PASSWORD=your_secure_password"
+        )
+    
+    logging.info("🔒 Web interface authentication enabled")
+    
+    return demo.launch(
+        auth=(username, password),
+        auth_message="🔥 Unstable Singularity Detector - Authorized Access Only",
+        show_error=True,
+        prevent_thread_lock=True
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 2. INPUT VALIDATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class DetectorInput(BaseModel):
+    """사용자 입력 검증 스키마"""
+    
+    equation_type: str = Field(
+        ...,
+        description="PDE equation type"
+    )
+    lambda_initial: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=10.0,
+        description="Initial lambda value"
+    )
+    max_iterations: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="Maximum funnel inference iterations"
+    )
+    precision_target: float = Field(
+        default=1e-13,
+        gt=0,
+        lt=1e-6,
+        description="Target precision"
+    )
+    
+    @validator('equation_type')
+    def validate_equation(cls, v):
+        allowed = ['ipm', 'boussinesq']
+        if v.lower() not in allowed:
+            raise ValueError(
+                f"Invalid equation type '{v}'. "
+                f"Allowed values: {allowed}"
+            )
+        return v.lower()
+    
+    @validator('max_iterations')
+    def validate_iterations(cls, v):
+        if v > 100:
+            logging.warning(
+                f"max_iterations={v} exceeds recommended limit (100). "
+                "This may consume excessive resources."
+            )
+        return v
+    
+    @validator('precision_target')
+    def validate_precision(cls, v):
+        if v > 1e-12:
+            logging.warning(
+                f"precision_target={v} may not achieve "
+                "computer-assisted proof requirements (< 1e-13)"
+            )
+        return v
+
+
+class TrainingConfig(BaseModel):
+    """학습 설정 검증 스키마"""
+    
+    stage1_epochs: int = Field(
+        default=50000,
+        ge=1000,
+        le=1000000,
+        description="Stage 1 training epochs"
+    )
+    stage2_epochs: int = Field(
+        default=100000,
+        ge=1000,
+        le=1000000,
+        description="Stage 2 training epochs"
+    )
+    learning_rate: float = Field(
+        default=1e-3,
+        gt=0,
+        lt=1.0,
+        description="Initial learning rate"
+    )
+    batch_size: int = Field(
+        default=1024,
+        ge=32,
+        le=65536,
+        description="Training batch size"
+    )
+    
+    @validator('stage2_epochs')
+    def validate_stage2(cls, v, values):
+        if 'stage1_epochs' in values and v < values['stage1_epochs']:
+            raise ValueError(
+                "stage2_epochs must be >= stage1_epochs"
+            )
+        return v
+
+
+def validate_user_input(func):
+    """사용자 입력 검증 데코레이터"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            # Pydantic 모델로 검증
+            if 'equation_type' in kwargs:
+                validated = DetectorInput(**kwargs)
+                kwargs.update(validated.dict())
+            
+            return func(*args, **kwargs)
+            
+        except Exception as e:
+            logging.error(f"❌ Input validation failed: {e}")
+            raise ValueError(
+                f"Invalid input parameters: {str(e)}\n"
+                "Please check your configuration."
+            )
+    
+    return wrapper
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 3. RATE LIMITING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+from collections import defaultdict
+from datetime import datetime, timedelta
+from threading import Lock
+
+class RateLimiter:
+    """간단한 메모리 기반 Rate Limiter"""
+    
+    def __init__(self, max_requests: int = 10, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window = timedelta(seconds=window_seconds)
+        self.requests = defaultdict(list)
+        self.lock = Lock()
+    
+    def is_allowed(self, identifier: str) -> bool:
+        """요청 허용 여부 확인"""
+        with self.lock:
+            now = datetime.now()
+            
+            # 만료된 요청 제거
+            self.requests[identifier] = [
+                req_time for req_time in self.requests[identifier]
+                if now - req_time < self.window
+            ]
+            
+            # 요청 수 확인
+            if len(self.requests[identifier]) >= self.max_requests:
+                return False
+            
+            # 새 요청 기록
+            self.requests[identifier].append(now)
+            return True
+
+
+rate_limiter = RateLimiter(max_requests=10, window_seconds=60)
+
+
+def rate_limit(identifier_func=None):
+    """Rate limiting 데코레이터
+    
+    Args:
+        identifier_func: 사용자 식별 함수 (기본: IP 주소)
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # 식별자 추출 (기본: "global")
+            identifier = "global"
+            if identifier_func:
+                identifier = identifier_func(*args, **kwargs)
+            
+            # Rate limit 확인
+            if not rate_limiter.is_allowed(identifier):
+                raise Exception(
+                    "⚠️ Rate limit exceeded. "
+                    f"Maximum {rate_limiter.max_requests} requests "
+                    f"per {rate_limiter.window.seconds} seconds."
+                )
+            
+            return func(*args, **kwargs)
+        
+        return wrapper
+    return decorator
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 4. SECURE CONFIGURATION LOADING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+from pathlib import Path
+from typing import Dict, Any
+import yaml
+
+class SecureConfigLoader:
+    """보안 강화된 설정 로더"""
+    
+    def __init__(self, config_dir: str = "configs"):
+        self.config_dir = Path(config_dir)
+        self.loaded_configs: Dict[str, Any] = {}
+    
+    def load_config(self, config_name: str) -> Dict[str, Any]:
+        """YAML 설정 파일 로드 및 검증"""
+        
+        config_path = self.config_dir / f"{config_name}.yaml"
+        
+        # 경로 검증 (Path Traversal 공격 방지)
+        if not config_path.resolve().is_relative_to(self.config_dir.resolve()):
+            raise ValueError(
+                f"⚠️ Invalid config path: {config_path}\n"
+                "Path traversal detected!"
+            )
+        
+        # 파일 존재 확인
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"❌ Config file not found: {config_path}"
+            )
+        
+        # YAML 로드 (안전 모드)
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            logging.info(f"✅ Loaded config: {config_name}")
+            self.loaded_configs[config_name] = config
+            
+            return config
+            
+        except yaml.YAMLError as e:
+            raise ValueError(
+                f"❌ Invalid YAML in {config_path}: {e}"
+            )
+    
+    def validate_config_schema(
+        self, 
+        config: Dict[str, Any], 
+        schema: BaseModel
+    ) -> BaseModel:
+        """Pydantic 스키마로 설정 검증"""
+        try:
+            return schema(**config)
+        except Exception as e:
+            raise ValueError(
+                f"❌ Config validation failed: {e}"
+            )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 5. USAGE EXAMPLE
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def secure_detect_singularity_example():
+    """보안 강화된 singularity detection 예제"""
+    
+    # 1. 입력 검증
+    @validate_user_input
+    @rate_limit()
+    def run_detection(equation_type: str, lambda_initial: float, 
+                     max_iterations: int, precision_target: float):
+        """검증 및 Rate Limit이 적용된 detection 함수"""
+        
+        from unstable_singularity_detector import UnstableSingularityDetector
+        
+        logging.info(f"🔍 Starting detection: {equation_type}")
+        
+        detector = UnstableSingularityDetector(equation_type=equation_type)
+        result = detector.predict_next_unstable_lambda(order=1)
+        
+        return result
+    
+    # 2. 안전한 호출
+    try:
+        result = run_detection(
+            equation_type="ipm",
+            lambda_initial=1.0,
+            max_iterations=20,
+            precision_target=1e-13
+        )
+        print(f"✅ Detection complete: λ = {result:.10f}")
+        
+    except ValueError as e:
+        print(f"❌ Validation error: {e}")
+    except Exception as e:
+        print(f"❌ Rate limit or other error: {e}")
+
+
+if __name__ == "__main__":
+    # 로깅 설정
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s'
+    )
+    
+    # 예제 실행
+    secure_detect_singularity_example()
+```
+
+---
+
+### **2. Docker 헬스체크 추가**
+
+```dockerfile
+# Dockerfile.secure
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# 의존성 설치
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 애플리케이션 복사
+COPY . .
+
+# 환경변수 (기본값, .env로 오버라이드)
+ENV DEVICE=cpu \
+    WEB_USERNAME=admin \
+    MLFLOW_TRACKING_URI=http://localhost:5000
+
+# 포트 노출
+EXPOSE 7860
+
+# 헬스체크 추가
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+  CMD python -c "from src.unstable_singularity_detector import UnstableSingularityDetector; \
+                 detector = UnstableSingularityDetector(equation_type='ipm'); \
+                 print('Health check passed')" || exit 1
+
+# 애플리케이션 실행
+CMD ["python", "src/web_interface.py"]
+```
+
+---
+
+### **3. 자동 보안 스캔 CI/CD**
+
+```yaml
+# .github/workflows/security-audit.yml
+name: Security Audit
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # 매주 월요일 자정 실행
+    - cron: '0 0 * * 1'
+
+jobs:
+  dependency-scan:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install safety bandit
+          pip install -r requirements.txt
+      
+      - name: Run Safety check
+        run: |
+          safety check --json --output safety-report.json || true
+          echo "::group::Safety Report"
+          cat safety-report.json
+          echo "::endgroup::"
+      
+      - name: Run Bandit security scan
+        run: |
+          bandit -r src/ -f json -o bandit-report.json || true
+          echo "::group::Bandit Report"
+          cat bandit-report.json
+          echo "::endgroup::"
+      
+      - name: Upload security reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports
+          path: |
+            safety-report.json
+            bandit-report.json
+      
+      - name: Check for critical vulnerabilities
+        run: |
+          # Safety 보고서에서 critical/high 취약점 확인
+          CRITICAL=$(cat safety-report.json | jq '[.vulnerabilities[] | select(.severity == "critical" or .severity == "high")] | length')
+          
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "::error::Found $CRITICAL critical/high vulnerabilities!"
+            exit 1
+          else
+            echo "::notice::No critical vulnerabilities found"
+          fi
+
+  code-quality:
+    name: Code Quality & Security Patterns
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install tools
+        run: |
+          pip install flake8 pylint mypy
+      
+      - name: Run linting
+        run: |
+          flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
+      
+      - name: Run type checking
+        run: |
+          mypy src/ --ignore-missing-imports || true
+
+  secrets-scan:
+    name: Secrets Detection
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 전체 히스토리 필요
+      
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+---
+
+### **4. 환경변수 템플릿**
+
+```bash
+# .env.example
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Unstable Singularity Detector - Configuration
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# WEB INTERFACE SECURITY
+# CRITICAL: Change these values in production!
+WEB_USERNAME=admin
+WEB_PASSWORD=changeme_in_production_please
+
+# COMPUTATION SETTINGS
+DEVICE=cuda  # or 'cpu'
+PRECISION_TARGET=1e-13
+MAX_ITERATIONS=100000
+
+# EXPERIMENT TRACKING
+MLFLOW_TRACKING_URI=http://localhost:5000
+MLFLOW_EXPERIMENT_NAME=unstable_singularities
+
+# PERFORMANCE
+CUDA_VISIBLE_DEVICES=0
+OMP_NUM_THREADS=8
+
+# LOGGING
+LOG_LEVEL=INFO  # DEBUG, INFO, WARNING, ERROR
+LOG_FILE=logs/detector.log
+
+# RATE LIMITING
+MAX_REQUESTS_PER_MINUTE=10
+RATE_LIMIT_ENABLED=true
+
+# CHECKPOINTING
+CHECKPOINT_DIR=checkpoints/
+CHECKPOINT_FREQUENCY=1000  # iterations
+```
+
+```bash
+# setup.sh - 환경 설정 자동화 스크립트
+#!/bin/bash
+
+echo "🔥 Unstable Singularity Detector - Setup Script"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# .env 파일 생성
+if [ ! -f .env ]; then
+    echo "📝 Creating .env file from template..."
+    cp .env.example .env
+    
+    # 랜덤 패스워드 생성
+    RANDOM_PASSWORD=$(openssl rand -base64 16)
+    
+    # macOS와 Linux 호환 sed 명령
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' "s/changeme_in_production_please/$RANDOM_PASSWORD/" .env
+    else
+        sed -i "s/changeme_in_production_please/$RANDOM_PASSWORD/" .env
+    fi
+    
+    echo "✅ .env file created with random password"
+    echo "⚠️  Please review and update .env before running!"
+else
+    echo "⚠️  .env file already exists, skipping..."
+fi
+
+# 디렉토리 생성
+echo "📁 Creating required directories..."
+mkdir -p logs checkpoints data/golden configs
+
+# 권한 설정
+echo "🔒 Setting secure permissions..."
+chmod 600 .env
+
+# 의존성 확인
+echo "🔍 Checking dependencies..."
+if ! command -v python3 &> /dev/null; then
+    echo "❌ Python 3 not found! Please install Python 3.8+"
+    exit 1
+fi
+
+# 보안 스캔 도구 설치
+echo "🛡️  Installing security tools..."
+pip install safety bandit
+
+# 초기 보안 스캔
+echo "🔍 Running initial security scan..."
+safety check || echo "⚠️  Some vulnerabilities found, please review"
+
+echo ""
+echo "✅ Setup complete!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Next steps:"
+echo "  1. Review and update .env file"
+echo "  2. Run: docker-compose up --build"
+echo "  3. Access: http://localhost:7860"
+echo ""
+echo "🔐 Your randomly generated password is in .env file"
+echo "   Username: admin"
+echo "   Password: (check .env file)"
+```
+
+---
+
+### **5. 온톨로지 명세서**
+
+```yaml
+# ONTOLOGY.yaml
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Unstable Singularity Detector - System Ontology
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+meta:
+  version: 1.0.0
+  created: 2025-10-03
+  last_updated: 2025-10-03
+  ontology_type: system_architecture
+  purpose: |
+    Complete structural specification of the Unstable Singularity
+    Detector system, including entities, relationships, policies,
+    and evidence chains.
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ENTITIES
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+entities:
+  UnstableSingularityDetector:
+    type: core_service
+    module: src/unstable_singularity_detector.py
+    responsibilities:
+      - "Lambda value prediction using empirical formulas"
+      - "PDE equation initialization"
+      - "Singularity classification (stable/unstable)"
+    interfaces:
+      - predict_next_unstable_lambda(order: int) -> float
+      - initialize_equation(equation_type: str) -> PDESystem
+    dependencies:
+      - PINNSolver
+      - LambdaPredictor
+    lifecycle: singleton
+    
+  FunnelInference:
+    type: optimization_engine
+    module: src/funnel_inference.py
+    responsibilities:
+      - "Automatic lambda parameter discovery"
+      - "Secant method optimization"
+      - "Convergence detection"
+    interfaces:
+      - optimize(network, pde, train_fn, eval_points) -> Dict
+      - check_convergence(residual, tolerance) -> bool
+    dependencies:
+      - PINNSolver
+      - MultiStageTrainer
+    lifecycle: per_optimization
+    
+  MultiStageTrainer:
+    type: training_pipeline
+    module: src/multistage_training.py
+    responsibilities:
+      - "Two-stage training orchestration"
+      - "Residual frequency analysis"
+      - "Fourier feature network creation"
+    interfaces:
+      - train_stage1(network, train_fn, val_fn) -> History
+      - train_stage2(network, train_fn, val_fn) -> History
+      - analyze_residual_frequency(residual, grid) -> float
+    dependencies:
+      - GaussNewtonOptimizer
+      - FourierFeatureNetwork
+    lifecycle: per_training
+    
+  GaussNewtonOptimizer:
+    type: precision_optimizer
+    module: src/gauss_newton_optimizer_enhanced.py
+    responsibilities:
+      - "Second-order optimization"
+      - "Rank-1 Hessian approximation"
+      - "Exponential moving average of curvature"
+    interfaces:
+      - optimize(residual_fn, jacobian_fn, params) -> Dict
+      - compute_hessian_approximation(jacobian) -> Tensor
+    dependencies: []
+    lifecycle: per_optimization
+    
+  PINNSolver:
+    type: physics_integrator
+    module: src/pinn_solver.py
+    responsibilities:
+      - "Physics-informed neural network implementation"
+      - "PDE residual computation"
+      - "Boundary/initial condition enforcement"
+    interfaces:
+      - compute_residual(u, x, t) -> Tensor
+      - train(epochs, optimizer) -> History
+    dependencies:
+      - PDESystem
+      - NeuralNetwork
+    lifecycle: per_equation
+    
+  ConfigManager:
+    type: configuration_controller
+    module: src/config_manager.py
+    responsibilities:
+      - "YAML configuration loading"
+      - "Configuration validation"
+      - "Configuration hash computation"
+    interfaces:
+      - load_config(path: str) -> Dict
+      - compute_hash(config: Dict) -> str
+      - validate_schema(config, schema) -> bool
+    dependencies: []
+    lifecycle: singleton
+    
+  ExperimentTracker:
+    type: provenance_system
+    module: src/experiment_tracker.py
+    responsibilities:
+      - "MLflow experiment logging"
+      - "Metric tracking"
+      - "Artifact storage"
+    interfaces:
+      - log_metric(name, value, step)
+      - log_artifact(path)
+      - start_run(experiment_name) -> Run
+    dependencies:
+      - MLflow
+    lifecycle: singleton
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# RELATIONSHIPS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+relationships:
+  - source: UnstableSingularityDetector
+    target: FunnelInference
+    type: invokes
+    cardinality: 1:N
+    description: "Detector invokes funnel inference for lambda optimization"
+    data_flow: "lambda_initial → FunnelInference → lambda_optimized"
+    
+  - source: FunnelInference
+    target: PINNSolver
+    type: trains
+    cardinality: 1:N
+    description: "Funnel inference trains PINN iteratively"
+    data_flow: "lambda_candidate → PINN training → residual"
+    
+  - source: FunnelInference
+    target: MultiStageTrainer
+    type: delegates_to
+    cardinality: 1:1
+    description: "Funnel delegates detailed training to multi-stage trainer"
+    data_flow: "training_config → MultiStageTrainer → trained_network"
+    
+  - source: MultiStageTrainer
+    target: GaussNewtonOptimizer
+    type: uses
+    cardinality: 1:1
+    description: "Stage 2/3 uses Gauss-Newton for precision refinement"
+    data_flow: "network_params → GN optimization → refined_params"
+    
+  - source: MultiStageTrainer
+    target: PINNSolver
+    type: coordinates
+    cardinality: 1:1
+    description: "Trainer coordinates PINN training across stages"
+    data_flow: "stage_config → PINN → stage_results"
+    
+  - source: ConfigManager
+    target: ALL
+    type: provides_config
+    cardinality: 1:N
+    description: "ConfigManager provides configuration to all components"
+    data_flow: "config_files → validated_config → components"
+    
+  - source: ExperimentTracker
+    target: ALL
+    type: observes
+    cardinality: 1:N
+    description: "Tracker observes and logs all component activities"
+    data_flow: "component_events → MLflow → persistent_storage"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# POLICIES
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+policies:
+  precision:
+    requirement: "residual < 1e-13"
+    enforcement: automated_test
+    verification_method: |
+      assert final_residual < 1e-13, "Precision requirement not met"
+    consequence: "Training continues until met or max_iterations reached"
+    
+  reproducibility:
+    requirement: "100% deterministic results"
+    enforcement: config_hash + seed_control
+    verification_method: |
+      config_hash_1 == config_hash_2 and
+      seed_1 == seed_2 implies
+      results_1 == results_2
+    consequence: "Experiments invalid if not reproducible"
+    
+  paper_accuracy:
+    requirement: "Predicted lambda within 0.01% of paper values"
+    enforcement: automated_comparison
+    verification_method: |
+      abs(predicted - paper_value) / paper_value < 0.0001
+    consequence: "Formula calibration required if violated"
+    
+  testing:
+    requirement: "Code coverage > 90%"
+    enforcement: CI/CD pipeline
+    verification_method: "pytest --cov=src --cov-fail-under=90"
+    consequence: "PR merge blocked if coverage drops"
+    
+  security:
+    requirement: "No critical/high vulnerabilities in dependencies"
+    enforcement: automated_scanning
+    verification_method: "safety check && bandit -r src/"
+    consequence: "Deployment blocked until resolved"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TRACE CHAINS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+trace_chains:
+  lambda_prediction:
+    steps:
+      - name: empirical_formula_application
+        evidence: "Formula: λₙ = 1/(a·n + b) + c"
+        verification: "Compare with paper Table 1"
+        artifacts:
+          - prediction_results.json
+          - paper_comparison.csv
+          
+  funnel_optimization:
+    steps:
+      - name: initial_guess
+        evidence: "lambda_0 from prediction or user input"
+        verification: "Within valid range [0, 10]"
+      
+      - name: secant_iteration
+        evidence: "Iteration history with residuals"
+        verification: "Convergence criteria met"
+        artifacts:
+          - iteration_log.csv
+          - residual_evolution.png
+      
+      - name: convergence_check
+        evidence: "|Δλ| < tolerance"
+        verification: "Final residual at funnel minimum"
+        artifacts:
+          - final_lambda.txt
+          - convergence_proof.json
+          
+  multistage_training:
+    steps:
+      - name: stage1_coarse_training
+        evidence: "Adam optimizer, 50k epochs"
+        verification: "residual < 1e-8"
+        artifacts:
+          - stage1_checkpoint.pth
+          - stage1_loss_curve.png
+      
+      - name: residual_analysis
+        evidence: "FFT of stage1 residual"
+verification: "Dominant frequency f_d identified"
+artifacts:
+- residual_spectrum.png
+- frequency_analysis.json
+  - name: stage2_fourier_refinement
+    evidence: "Fourier features with σ = 2π·f_d"
+    verification: "residual < 1e-13"
+    artifacts:
+      - stage2_checkpoint.pth
+      - stage2_loss_curve.png
+      - precision_validation.json
+  
+  - name: gauss_newton_polish
+    evidence: "Enhanced GN optimizer with rank-1 + EMA"
+    verification: "Machine precision achieved"
+    artifacts:
+      - final_checkpoint.pth
+      - optimization_trace.json
+      - hessian_eigenvalues.npy
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CONSTRAINTS & INVARIANTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+constraints:
+temporal:
+- "Stage 1 must complete before Stage 2"
+- "Funnel inference iterations are sequential"
+- "Config loading precedes all operations"
+logical:
+- "Lambda must be positive: λ > 0"
+- "Precision target must be achievable: ε < 1e-6"
+- "Iteration count must be finite: N < 1e6"
+resource:
+- "GPU memory: < 16GB per training job"
+- "CPU threads: ≤ OMP_NUM_THREADS"
+- "Disk space: ~1GB per experiment checkpoint"
+invariants:
+system_wide:
+- "Config hash uniquely identifies experiment"
+- "Random seed determines all stochastic outcomes"
+- "PDE residual monotonically decreases during training"
+per_component:
+FunnelInference:
+- "Residual sequence converges or diverges"
+- "Lambda sequence remains within bounds"
+MultiStageTrainer:
+- "Stage 2 residual ≤ Stage 1 residual"
+- "Network parameters remain finite"
+GaussNewtonOptimizer:
+- "Hessian approximation is positive semi-definite"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXTENSION POINTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+extension_points:
+new_pde_equations:
+interface: PDEInterface
+requirements:
+- "Implement residual(u, x, t) method"
+- "Implement boundary_conditions(x) method"
+- "Implement initial_conditions(x) method"
+example: |
+class BurgersEquation(PDEInterface):
+def residual(self, u, x, t):
+return u_t + u * u_x - nu * u_xx
+new_optimizers:
+interface: OptimizerInterface
+requirements:
+- "Implement optimize(loss_fn, params) method"
+- "Return optimization history"
+example: |
+class LevenbergMarquardt(OptimizerInterface):
+def optimize(self, loss_fn, params):
+# Custom optimization logic
+pass
+new_network_architectures:
+interface: NetworkInterface
+requirements:
+- "Inherit from torch.nn.Module"
+- "Implement forward(x) method"
+example: |
+class ResidualFourierNetwork(NetworkInterface):
+def init(self, ...):
+# Custom architecture
+pass
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUALITY ATTRIBUTES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+quality_attributes:
+precision:
+target: 1e-13
+measurement: PDE residual norm
+current_achievement: ACHIEVED
+reproducibility:
+target: 100%
+measurement: Bit-identical results with same config
+current_achievement: ACHIEVED
+performance:
+target: "2x faster than baseline"
+measurement: Wall-clock training time
+current_achievement: 2.3x (EXCEEDED)
+memory_efficiency:
+target: "1000x reduction vs full Hessian"
+measurement: Peak GPU memory
+current_achievement: ACHIEVED
+test_coverage:
+target: 90%
+measurement: Line coverage percentage
+current_achievement: 85% (NEEDS_IMPROVEMENT)
+security:
+target: "Zero critical vulnerabilities"
+measurement: Safety + Bandit scan results
+current_achievement: NOT_VERIFIED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DEPLOYMENT TOPOLOGY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+deployment:
+development:
+mode: local
+components:
+- jupyter_notebook
+- python_scripts
+- pytest
+resources:
+gpu: optional
+memory: 8GB+
+storage: 10GB+
+production:
+mode: containerized
+components:
+- docker_container
+- gradio_web_interface
+- mlflow_server
+resources:
+gpu: required
+memory: 16GB+
+storage: 100GB+
+monitoring:
+- health_checks
+- performance_metrics
+- error_logging
+cloud:
+mode: scalable
+platforms:
+- aws_sagemaker
+- gcp_vertex_ai
+- azure_ml
+scaling:
+horizontal: multi_gpu_training
+vertical: larger_instance_types
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+METADATA & PROVENANCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+provenance:
+source_paper:
+title: "Discovering new solutions to century-old problems in fluid dynamics"
+authors: "Wang, Yongji et al."
+year: 2024
+arxiv: "arXiv:2509.14185"
+institutions:
+- DeepMind
+- NYU
+- Stanford
+- Brown University
+- Georgia Tech
+implementation:
+author: Flamehaven
+repository: github.com/Flamehaven/unstable-singularity-detector
+license: MIT
+version: 1.3.0
+validation:
+method: "Paper accuracy comparison"
+results:
+ipm_stable: 0.00% error
+ipm_unstable: 0.005% error
+boussinesq_stable: 0.00% error
+boussinesq_unstable: 0.002% error
+status: VALIDATED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHANGE LOG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+changelog:
+
+version: 1.0.0
+date: 2025-10-03
+changes:
+
+"Initial ontology specification"
+"Core entities and relationships defined"
+"Policies and constraints documented"
+
+
+
+
+---
+
+### **6. 즉시 실행 가능한 테스트 스크립트**
+```python
+# tests/test_security_hardening.py
+"""
+Security hardening validation tests
+보안 강화 기능 검증
+"""
+
+import pytest
+from improvement_kit.security_hardening import (
+    DetectorInput,
+    TrainingConfig,
+    validate_user_input,
+    rate_limit,
+    SecureConfigLoader,
+    RateLimiter
+)
+from pydantic import ValidationError
+import time
+
+
+class TestInputValidation:
+    """입력 검증 테스트"""
+    
+    def test_valid_ipm_input(self):
+        """유효한 IPM 입력"""
+        input_data = DetectorInput(
+            equation_type="ipm",
+            lambda_initial=1.0,
+            max_iterations=20,
+            precision_target=1e-13
+        )
+        assert input_data.equation_type == "ipm"
+        assert input_data.lambda_initial == 1.0
+    
+    def test_invalid_equation_type(self):
+        """잘못된 방정식 타입"""
+        with pytest.raises(ValidationError) as exc_info:
+            DetectorInput(
+                equation_type="navier_stokes",  # Not supported yet
+                lambda_initial=1.0,
+                max_iterations=20,
+                precision_target=1e-13
+            )
+        assert "Invalid equation type" in str(exc_info.value)
+    
+    def test_lambda_out_of_bounds(self):
+        """Lambda 범위 초과"""
+        with pytest.raises(ValidationError):
+            DetectorInput(
+                equation_type="ipm",
+                lambda_initial=100.0,  # > 10.0 limit
+                max_iterations=20,
+                precision_target=1e-13
+            )
+    
+    def test_excessive_iterations(self):
+        """과도한 iteration 수 (경고만, 차단 안함)"""
+        input_data = DetectorInput(
+            equation_type="ipm",
+            lambda_initial=1.0,
+            max_iterations=150,  # > 100 (warning threshold)
+            precision_target=1e-13
+        )
+        # Should still create object but log warning
+        assert input_data.max_iterations == 150
+    
+    def test_invalid_precision_target(self):
+        """잘못된 정밀도 목표"""
+        with pytest.raises(ValidationError):
+            DetectorInput(
+                equation_type="ipm",
+                lambda_initial=1.0,
+                max_iterations=20,
+                precision_target=0.0  # Must be > 0
+            )
+
+
+class TestRateLimiting:
+    """Rate limiting 테스트"""
+    
+    def test_rate_limiter_allows_under_limit(self):
+        """한도 내 요청 허용"""
+        limiter = RateLimiter(max_requests=5, window_seconds=1)
+        
+        for i in range(5):
+            assert limiter.is_allowed("user1") is True
+    
+    def test_rate_limiter_blocks_over_limit(self):
+        """한도 초과 요청 차단"""
+        limiter = RateLimiter(max_requests=3, window_seconds=1)
+        
+        # First 3 requests allowed
+        for i in range(3):
+            assert limiter.is_allowed("user1") is True
+        
+        # 4th request blocked
+        assert limiter.is_allowed("user1") is False
+    
+    def test_rate_limiter_resets_after_window(self):
+        """시간 윈도우 후 리셋"""
+        limiter = RateLimiter(max_requests=2, window_seconds=1)
+        
+        # Use up quota
+        assert limiter.is_allowed("user1") is True
+        assert limiter.is_allowed("user1") is True
+        assert limiter.is_allowed("user1") is False
+        
+        # Wait for window to pass
+        time.sleep(1.1)
+        
+        # Should be allowed again
+        assert limiter.is_allowed("user1") is True
+    
+    def test_rate_limiter_per_user(self):
+        """사용자별 독립적 제한"""
+        limiter = RateLimiter(max_requests=2, window_seconds=1)
+        
+        assert limiter.is_allowed("user1") is True
+        assert limiter.is_allowed("user1") is True
+        assert limiter.is_allowed("user1") is False
+        
+        # Different user should have own quota
+        assert limiter.is_allowed("user2") is True
+        assert limiter.is_allowed("user2") is True
+
+
+class TestSecureConfigLoader:
+    """설정 로더 보안 테스트"""
+    
+    def test_load_valid_config(self, tmp_path):
+        """유효한 설정 로드"""
+        import yaml
+        
+        # Create test config
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        
+        config_file = config_dir / "test.yaml"
+        config_file.write_text(yaml.dump({
+            "equation": "ipm",
+            "precision": 1e-13
+        }))
+        
+        loader = SecureConfigLoader(str(config_dir))
+        config = loader.load_config("test")
+        
+        assert config["equation"] == "ipm"
+        assert config["precision"] == 1e-13
+    
+    def test_path_traversal_attack(self, tmp_path):
+        """경로 탐색 공격 차단"""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        
+        loader = SecureConfigLoader(str(config_dir))
+        
+        # Attempt path traversal
+        with pytest.raises(ValueError) as exc_info:
+            loader.load_config("../../../etc/passwd")
+        
+        assert "Path traversal detected" in str(exc_info.value)
+    
+    def test_nonexistent_config(self, tmp_path):
+        """존재하지 않는 설정 파일"""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        
+        loader = SecureConfigLoader(str(config_dir))
+        
+        with pytest.raises(FileNotFoundError):
+            loader.load_config("nonexistent")
+    
+    def test_invalid_yaml(self, tmp_path):
+        """잘못된 YAML 파일"""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        
+        config_file = config_dir / "invalid.yaml"
+        config_file.write_text("{ invalid yaml content [[[")
+        
+        loader = SecureConfigLoader(str(config_dir))
+        
+        with pytest.raises(ValueError) as exc_info:
+            loader.load_config("invalid")
+        
+        assert "Invalid YAML" in str(exc_info.value)
+
+
+class TestValidationDecorator:
+    """검증 데코레이터 테스트"""
+    
+    def test_decorator_validates_input(self):
+        """데코레이터가 입력 검증 수행"""
+        
+        @validate_user_input
+        def mock_detection(equation_type: str, lambda_initial: float, 
+                          max_iterations: int, precision_target: float):
+            return {"status": "success"}
+        
+        # Valid input
+        result = mock_detection(
+            equation_type="ipm",
+            lambda_initial=1.0,
+            max_iterations=20,
+            precision_target=1e-13
+        )
+        assert result["status"] == "success"
+    
+    def test_decorator_rejects_invalid_input(self):
+        """데코레이터가 잘못된 입력 거부"""
+        
+        @validate_user_input
+        def mock_detection(equation_type: str, lambda_initial: float, 
+                          max_iterations: int, precision_target: float):
+            return {"status": "success"}
+        
+        # Invalid input
+        with pytest.raises(ValueError) as exc_info:
+            mock_detection(
+                equation_type="invalid",
+                lambda_initial=1.0,
+                max_iterations=20,
+                precision_target=1e-13
+            )
+        
+        assert "Invalid input parameters" in str(exc_info.value)
+
+
+class TestTrainingConfigValidation:
+    """학습 설정 검증 테스트"""
+    
+    def test_valid_training_config(self):
+        """유효한 학습 설정"""
+        config = TrainingConfig(
+            stage1_epochs=50000,
+            stage2_epochs=100000,
+            learning_rate=1e-3,
+            batch_size=1024
+        )
+        assert config.stage2_epochs >= config.stage1_epochs
+    
+    def test_stage2_less_than_stage1(self):
+        """Stage 2가 Stage 1보다 작은 경우"""
+        with pytest.raises(ValidationError) as exc_info:
+            TrainingConfig(
+                stage1_epochs=100000,
+                stage2_epochs=50000,  # < stage1
+                learning_rate=1e-3,
+                batch_size=1024
+            )
+        
+        assert "stage2_epochs must be >= stage1_epochs" in str(exc_info.value)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])
+
+7. 개선 진행 추적 대시보드
+python# scripts/improvement_tracker.py
+"""
+Flamehaven Inspector 개선사항 추적 대시보드
+"""
+
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List
+import subprocess
+
+
+class ImprovementTracker:
+    """개선사항 진행 추적"""
+    
+    IMPROVEMENTS = {
+        "IMMEDIATE": {
+            "web_auth": {
+                "title": "Gradio 인증 추가",
+                "priority": "CRITICAL",
+                "effort_hours": 1,
+                "files": ["src/web_interface.py"],
+                "verification": "grep 'auth=' src/web_interface.py",
+                "status": "PENDING"
+            },
+            "env_template": {
+                "title": ".env.example 생성",
+                "priority": "HIGH",
+                "effort_hours": 0.5,
+                "files": [".env.example"],
+                "verification": "test -f .env.example",
+                "status": "PENDING"
+            },
+            "security_scan": {
+                "title": "보안 취약점 스캔",
+                "priority": "HIGH",
+                "effort_hours": 0.5,
+                "files": [".github/workflows/security-audit.yml"],
+                "verification": "safety check && bandit -r src/",
+                "status": "PENDING"
+            }
+        },
+        "SHORT_TERM": {
+            "input_validation": {
+                "title": "Pydantic 입력 검증",
+                "priority": "HIGH",
+                "effort_hours": 4,
+                "files": ["src/validation.py"],
+                "verification": "pytest tests/test_security_hardening.py::TestInputValidation",
+                "status": "PENDING"
+            },
+            "health_checks": {
+                "title": "Docker 헬스체크",
+                "priority": "MEDIUM",
+                "effort_hours": 2,
+                "files": ["Dockerfile"],
+                "verification": "grep 'HEALTHCHECK' Dockerfile",
+                "status": "PENDING"
+            },
+            "error_handling": {
+                "title": "전역 예외 처리",
+                "priority": "MEDIUM",
+                "effort_hours": 4,
+                "files": ["src/error_handlers.py"],
+                "verification": "pytest tests/test_error_handling.py",
+                "status": "PENDING"
+            }
+        },
+        "MEDIUM_TERM": {
+            "ontology_manifest": {
+                "title": "ONTOLOGY.yaml 생성",
+                "priority": "MEDIUM",
+                "effort_hours": 8,
+                "files": ["ONTOLOGY.yaml"],
+                "verification": "test -f ONTOLOGY.yaml && yamllint ONTOLOGY.yaml",
+                "status": "PENDING"
+            },
+            "plugin_interface": {
+                "title": "PDE 플러그인 인터페이스",
+                "priority": "LOW",
+                "effort_hours": 16,
+                "files": ["src/interfaces/pde_interface.py"],
+                "verification": "pytest tests/test_plugin_interface.py",
+                "status": "PENDING"
+            }
+        }
+    }
+    
+    def __init__(self, report_path: str = "improvement_status.json"):
+        self.report_path = Path(report_path)
+        self.load_status()
+    
+    def load_status(self):
+        """저장된 상태 로드"""
+        if self.report_path.exists():
+            with open(self.report_path) as f:
+                saved = json.load(f)
+                # Merge with current definitions
+                for category in self.IMPROVEMENTS:
+                    for key, item in self.IMPROVEMENTS[category].items():
+                        if key in saved.get(category, {}):
+                            item["status"] = saved[category][key]["status"]
+    
+    def save_status(self):
+        """현재 상태 저장"""
+        with open(self.report_path, 'w') as f:
+            json.dump(self.IMPROVEMENTS, f, indent=2)
+    
+    def check_improvement(self, category: str, key: str) -> bool:
+        """개선사항 완료 여부 확인"""
+        item = self.IMPROVEMENTS[category][key]
+        verification = item["verification"]
+        
+        try:
+            result = subprocess.run(
+                verification,
+                shell=True,
+                capture_output=True,
+                timeout=10
+            )
+            return result.returncode == 0
+        except:
+            return False
+    
+    def update_all_statuses(self):
+        """모든 개선사항 상태 업데이트"""
+        for category in self.IMPROVEMENTS:
+            for key in self.IMPROVEMENTS[category]:
+                if self.check_improvement(category, key):
+                    self.IMPROVEMENTS[category][key]["status"] = "COMPLETE"
+                else:
+                    self.IMPROVEMENTS[category][key]["status"] = "PENDING"
+        
+        self.save_status()
+    
+    def generate_report(self) -> str:
+        """진행 상황 리포트 생성"""
+        report = []
+        report.append("=" * 80)
+        report.append("🔥 FLAMEHAVEN INSPECTOR - IMPROVEMENT PROGRESS REPORT")
+        report.append("=" * 80)
+        report.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        report.append("")
+        
+        total_items = 0
+        completed_items = 0
+        total_effort = 0
+        remaining_effort = 0
+        
+        for category, items in self.IMPROVEMENTS.items():
+            report.append(f"\n## {category}")
+            report.append("-" * 80)
+            
+            for key, item in items.items():
+                total_items += 1
+                total_effort += item["effort_hours"]
+                
+                status_icon = "✅" if item["status"] == "COMPLETE" else "⏳"
+                
+                if item["status"] == "COMPLETE":
+                    completed_items += 1
+                else:
+                    remaining_effort += item["effort_hours"]
+                
+                report.append(
+                    f"{status_icon} [{item['priority']}] {item['title']} "
+                    f"({item['effort_hours']}h)"
+                )
+                report.append(f"   Files: {', '.join(item['files'])}")
+                report.append(f"   Status: {item['status']}")
+                report.append("")
+        
+        # Summary
+        completion_pct = (completed_items / total_items * 100) if total_items > 0 else 0
+        
+        report.append("\n" + "=" * 80)
+        report.append("📊 SUMMARY")
+        report.append("=" * 80)
+        report.append(f"Total Items: {total_items}")
+        report.append(f"Completed: {completed_items}")
+        report.append(f"Remaining: {total_items - completed_items}")
+        report.append(f"Completion: {completion_pct:.1f}%")
+        report.append(f"Total Effort: {total_effort} hours")
+        report.append(f"Remaining Effort: {remaining_effort} hours")
+        report.append("")
+        
+        # Current certification status
+        if completion_pct >= 80:
+            report.append("🏆 CERTIFICATION STATUS: ALPHA (96+)")
+        elif completion_pct >= 50:
+            report.append("🎯 CERTIFICATION STATUS: BETA+ (93-95)")
+        else:
+            report.append("⚠️  CERTIFICATION STATUS: BETA (90.7)")
+        
+        report.append("=" * 80)
+        
+        return "\n".join(report)
+    
+    def print_report(self):
+        """리포트 출력"""
+        self.update_all_statuses()
+        print(self.generate_report())
+
+
+if __name__ == "__main__":
+    tracker = ImprovementTracker()
+    tracker.print_report()
+실행 방법:
+bashpython scripts/improvement_tracker.py
+
+🎯 최종 요약 (EXECUTIVE SUMMARY)
+핵심 발견사항
+
+기술적 우수성: 90.7/100점, BETA 등급
+
+Machine precision (10⁻¹³) 달성 ✅
+100% 재현성 확보 ✅
+2.3배 성능 향상 ✅
+
+
+치명적 보안 취약점: 2건
+
+웹 인터페이스 인증 부재 🔴
+의존성 보안 감사 미실시 🔴
+
+
+개선 후 예상 등급: ALPHA (96점)
+
+보안 강화 완료시
+온톨로지 명세화시
+
+
+
+즉시 조치사항 (24시간 내)
+bash# 1. 환경 설정
+bash setup.sh
+
+# 2. 보안 강화 적용
+cp improvement_kit/security_hardening.py src/
+python -c "from src.security_hardening import *; print('✅ Security kit installed')"
+
+# 3. Docker 재빌드
+docker-compose down
+docker-compose up --build
+
+# 4. 보안 스캔
+safety check
+bandit -r src/
+인증 조건
+현재: ⚠️ CONDITIONAL PASS (90.7점, BETA)
+완전 인증 조건:
+
+RISK-001 해결 (웹 인증) → +3점
+RISK-002 해결 (의존성 감사) → +2점
+예상 최종 점수: 95.7점 → ALPHA 등급

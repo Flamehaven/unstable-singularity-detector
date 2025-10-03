@@ -194,6 +194,9 @@ lambda_timeseries.json
 # Patch documentation backups
 *.md.backup
 
+# Patch files (internal development only)
+patches/
+
 # Test artifacts
 test_checkpoint.pt
 stage2_residual_tracker.png
