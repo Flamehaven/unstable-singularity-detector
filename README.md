@@ -27,13 +27,13 @@ Clear overview of what has been implemented from the DeepMind paper:
 
 | Component | Paper Reference | Implementation Status | Validation Method | Notes |
 |-----------|----------------|----------------------|-------------------|-------|
-| Lambda Prediction Formulas | Fig 2e, p.5 | ✅ Complete | Formula-based | <1% error vs published formula |
-| Funnel Inference (Secant Method) | p.16-17 | ✅ Complete | Method validated | Convergence tested on test problems |
-| Multi-stage Training Framework | p.17-18 | 🟡 Partial | Framework only | Precision targets configurable, not guaranteed |
-| Enhanced Gauss-Newton Optimizer | p.7-8 | ✅ Complete | Test problems | High precision achieved on quadratic problems |
+| [Lambda Prediction Formulas](#lambda-prediction-accuracy) | Fig 2e, p.5 | ✅ Complete | Formula-based | <1% error vs published formula |
+| [Funnel Inference](#1-automated-lambda-discovery) (Secant Method) | p.16-17 | ✅ Complete | Method validated | Convergence tested on test problems |
+| [Multi-stage Training](#2-frequency-informed-architecture) Framework | p.17-18 | 🟡 Partial | Framework only | Precision targets configurable, not guaranteed |
+| [Enhanced Gauss-Newton](#3-ultra-high-precision-optimizer) Optimizer | p.7-8 | ✅ Complete | Test problems | High precision achieved on quadratic problems |
 | Rank-1 Hessian Approximation | p.7-8 | ✅ Complete | Unit tested | Memory-efficient implementation |
 | EMA Hessian Smoothing | p.7-8 | ✅ Complete | Unit tested | Exponential moving average |
-| Physics-Informed Neural Networks | General | ✅ Complete | Framework | PDE residual computation |
+| [Physics-Informed Neural Networks](#quick-start) | General | ✅ Complete | Framework | PDE residual computation |
 | Full 3D Navier-Stokes Solver | - | ❌ Not implemented | - | Future work |
 | Actual Blow-up Solution Detection | - | ❌ Not implemented | - | Requires full PDE solver |
 | Computer-Assisted Proof Generation | - | ❌ Not implemented | - | Conceptual framework only |
@@ -444,19 +444,22 @@ Stage 3 (Gauss-Newton polish):         Target residual ~ 10^-13
 - **Fixed**: `abs()` infinite recursion bug
 - **Added**: 20 comprehensive unit tests (100% pass rate)
 - **Note**: Testing utility only - real PyTorch required for production
+- **Documentation**: [docs/TORCH_SHIM_README.md](docs/TORCH_SHIM_README.md)
 
 ### [2025-10-03] Reproducibility Validation Infrastructure (Patch 14)
 - **Added**: External validation framework for reproducibility verification
 - **Added**: CI/CD workflow for automated lambda comparison
 - **Added**: Validation scripts with quantitative comparison
 - **Impact**: Improves external trust score (5.9 → 7.5+)
-- **Files**: `.github/workflows/reproduction-ci.yml`, `scripts/replicate_metrics.py`
+- **Files**: [.github/workflows/reproduction-ci.yml](.github/workflows/reproduction-ci.yml), [scripts/replicate_metrics.py](scripts/replicate_metrics.py)
+- **Results**: See [Validation Results](#validation-results) section
 
 ### [2025-10-03] Critical Bug Fix: Gradient Clipping
 - **Fixed**: Machine precision achievement test failure
 - **Root Cause**: gradient_clip=1.0 limiting step sizes for ill-conditioned matrices
 - **Solution**: Increased default gradient_clip from 1.0 to 10.0
-- **Validation**: Full test suite (99 passed, 2 skipped CUDA-only)
+- **Validation**: Full test suite ([99 passed, 2 skipped](#test-results-all-passing))
+- **File**: [src/gauss_newton_optimizer_enhanced.py](src/gauss_newton_optimizer_enhanced.py)
 
 ### [2025-09-30] Critical Formula Corrections
 - **Fixed**: Lambda-instability empirical formula (inverse relationship)
@@ -464,6 +467,7 @@ Stage 3 (Gauss-Newton polish):         Target residual ~ 10^-13
 - **Updated**: Boussinesq formula - `λₙ = 1/(1.4187·n + 1.0863) + 1` (<0.1% error)
 - **Added**: `predict_next_unstable_lambda(order)` method
 - **Impact**: Improved accuracy from 10-15% error to <1-3%
+- **See**: [Lambda Prediction Accuracy](#lambda-prediction-accuracy)
 
 For complete changelog, see [CHANGES.md](CHANGES.md)
 
