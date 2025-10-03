@@ -231,7 +231,7 @@ graph LR
 graph TD
     A[Initial λ₀] --> B[Train PINN<br/>Fixed λ]
     B --> C[Evaluate r̂λ]
-    C --> D{|Δλ| < tol?}
+    C --> D{"abs(Δλ) < tol?"}
     D -->|No| E[Secant Update:<br/>λₙ₊₁ = λₙ - r̂·Δλ/Δr̂]
     E --> B
     D -->|Yes| F[Admissible λ* Found!]
