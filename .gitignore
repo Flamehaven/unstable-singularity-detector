@@ -200,9 +200,11 @@ patches/
 patch_*
 patches_*
 *_patch.*
+*_patches.*
 *.patch
 PATCH_*
 ALL_PATCHES_*
+test_*_patches.*
 
 # Test artifacts
 test_checkpoint.pt
