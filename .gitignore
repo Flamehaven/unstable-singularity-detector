@@ -195,8 +195,14 @@ lambda_timeseries.json
 # Patch documentation backups
 *.md.backup
 
-# Patch files (internal development only)
+# Patch files (internal development only - exclude from public repo)
 patches/
+patch_*
+patches_*
+*_patch.*
+*.patch
+PATCH_*
+ALL_PATCHES_*
 
 # Test artifacts
 test_checkpoint.pt
