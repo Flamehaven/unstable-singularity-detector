@@ -42,8 +42,8 @@ class GaussNewtonConfig:
     damping_increase: float = 10.0
     damping_decrease: float = 0.1
 
-    # Gradient clipping
-    gradient_clip: float = 1.0
+    # Gradient clipping (increased for ill-conditioned problems)
+    gradient_clip: float = 10.0
 
     # EMA for Hessian approximation (DeepMind enhancement)
     use_ema_hessian: bool = True

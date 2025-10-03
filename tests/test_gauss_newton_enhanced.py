@@ -200,6 +200,8 @@ class TestHighPrecisionGaussNewtonEnhanced:
         n_params = 3
         n_residuals = 6
 
+        # Use fixed seed for reproducible test
+        torch.manual_seed(42)
         true_params = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
         A = torch.randn(n_residuals, n_params, dtype=torch.float64)
         b = torch.matmul(A, true_params)
@@ -213,6 +215,7 @@ class TestHighPrecisionGaussNewtonEnhanced:
         config = GaussNewtonConfig(
             max_iterations=100,
             tolerance=1e-12,
+            gradient_clip=10.0,  # Increased for ill-conditioned problems
             verbose=False
         )
 
@@ -222,7 +225,7 @@ class TestHighPrecisionGaussNewtonEnhanced:
         results = optimizer.optimize(compute_residual, compute_jacobian, initial)
 
         # Machine precision check
-        assert results['loss'] < 1e-12
+        assert results['loss'] < 1e-12, f"Loss {results['loss']:.2e} >= 1e-12"
         print(f"[+] Machine precision achieved: loss = {results['loss']:.2e}")
 
     def test_enhanced_components_initialization(self):
