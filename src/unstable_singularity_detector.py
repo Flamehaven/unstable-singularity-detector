@@ -236,8 +236,9 @@ class UnstableSingularityDetector:
         """
         # Extract time series at spatial point
         time_series = local_solution[:, spatial_idx[0], spatial_idx[1]]
-        times = local_times.numpy()
-        values = time_series.numpy()
+        # GPU-safe conversion: detach from autograd and move to CPU
+        times = local_times.detach().cpu().numpy()
+        values = time_series.detach().cpu().numpy()
 
         # Assume self-similar blow-up: u(x,t) ~ (T-t)^(-λ) * F(x/(T-t)^α)
         # ALGORITHM ASSUMPTION: Blow-up occurs shortly after the last observed time point
@@ -331,7 +332,8 @@ class UnstableSingularityDetector:
         y_start = max(0, y_center - radius)
         y_end = min(solution_slice.shape[1], y_center + radius + 1)
 
-        profile = solution_slice[x_start:x_end, y_start:y_end].numpy()
+        # GPU-safe conversion: detach from autograd and move to CPU
+        profile = solution_slice[x_start:x_end, y_start:y_end].detach().cpu().numpy()
         return profile
 
     def _classify_singularity_type(self,
