@@ -55,9 +55,11 @@ ENV MPLCONFIGDIR=/app/.matplotlib
 # Expose port for Gradio interface (added in Phase 3)
 EXPOSE 7860
 
-# Health check
+# Health check - Enhanced version
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import torch; import unstable_singularity_detector" || exit 1
+    CMD python -c "from src.unstable_singularity_detector import UnstableSingularityDetector; \
+                   detector = UnstableSingularityDetector(equation_type='ipm'); \
+                   print('Health check passed')" || exit 1
 
 # Default command: show info
 CMD ["singularity-detect", "info"]
