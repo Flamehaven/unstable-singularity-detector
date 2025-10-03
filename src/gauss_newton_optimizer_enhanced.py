@@ -166,10 +166,12 @@ class EMAHessianApproximation:
         jtj_diag = torch.sum(jacobian ** 2, dim=0)  # [P]
 
         if not self.initialized:
-            self.ema_diag = jtj_diag
+            # Initialize with correct device
+            self.ema_diag = jtj_diag.clone()
             self.initialized = True
         else:
-            # EMA update
+            # EMA update (ensure same device)
+            self.ema_diag = self.ema_diag.to(jacobian.device)
             self.ema_diag = self.decay * self.ema_diag + (1 - self.decay) * jtj_diag
 
     def get_preconditioner(self, damping: float = 1e-6) -> torch.Tensor:
@@ -289,8 +291,12 @@ class HighPrecisionGaussNewtonEnhanced:
         JTJ = torch.matmul(jacobian.T, jacobian)
         JTr = torch.matmul(jacobian.T, residual)
 
-        # Add Levenberg-Marquardt damping
-        damped_JTJ = JTJ + self.damping * torch.eye(n_params, dtype=self.config.precision)
+        # Add Levenberg-Marquardt damping (with device consistency)
+        damped_JTJ = JTJ + self.damping * torch.eye(
+            n_params,
+            dtype=self.config.precision,
+            device=jacobian.device
+        )
 
         # Apply EMA preconditioning if available
         if self.config.use_ema_hessian and self.ema_hessian is not None:
