@@ -1,0 +1,191 @@
+name: E2E Metrics & Auto-Documentation
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'tests_e2e/**'
+      - 'examples/e2e_*.py'
+      - 'scripts/generate_metric_report.py'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Manual trigger for full pipeline
+
+jobs:
+  e2e-tests-minimal:
+    name: E2E Tests (CI - Minimal Grid)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -e .
+        pip install pytest pytest-json-report pyyaml pandas
+
+    - name: Run E2E tests (minimal configuration)
+      run: |
+        pytest tests_e2e/ -v --tb=short \
+          --json-report \
+          --json-report-file=results/e2e/test_results_${{ matrix.python-version }}.json
+
+    - name: Upload E2E test results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: e2e-results-${{ matrix.python-version }}
+        path: results/e2e/
+
+  generate-metrics:
+    name: Generate Metric Reports
+    needs: e2e-tests-minimal
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        pip install pandas pyyaml
+
+    - name: Download all test artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: results/e2e/
+
+    - name: Generate metric summary
+      run: |
+        python scripts/generate_metric_report.py \
+          --input results/e2e \
+          --output results/metric_summary.md
+
+    - name: Upload metric reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: metric-reports
+        path: |
+          results/metric_summary.md
+          results/metrics.csv
+          results/ci_metrics.json
+
+    - name: Post summary to PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const summary = fs.readFileSync('results/metric_summary.md', 'utf8');
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## E2E Metric Summary\n\n${summary}`
+          });
+
+  full-pipeline-manual:
+    name: Full E2E Pipeline (Manual Trigger)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # Safety: max 2 hours
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -e .
+        pip install pyyaml matplotlib
+
+    - name: Run full E2E IPM pipeline
+      run: |
+        python examples/e2e_ipm_pipeline.py \
+          --config configs/e2e/ipm_full.yaml
+
+    - name: Upload full pipeline results
+      uses: actions/upload-artifact@v3
+      with:
+        name: full-e2e-pipeline
+        path: |
+          results/e2e/
+          results/plots/
+
+    - name: Check for failures
+      if: failure()
+      run: |
+        echo "[!] Full pipeline failed - check failure_case_*.json logs"
+        find results/e2e -name "failure_case_*.json" -exec cat {} \;
+
+  update-readme-table:
+    name: Update README Metrics Table
+    needs: generate-metrics
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Download metric reports
+      uses: actions/download-artifact@v3
+      with:
+        name: metric-reports
+        path: results/
+
+    - name: Extract metrics table
+      run: |
+        # Extract table from metric_summary.md
+        sed -n '/## Metric Overview/,/---/p' results/metric_summary.md | \
+          sed '1d;$d' > /tmp/metrics_table.md
+
+    - name: Update README.md
+      run: |
+        # Find and replace E2E metrics section in README
+        # (Assumes README has markers: <!-- E2E_METRICS_START --> ... <!-- E2E_METRICS_END -->)
+        if grep -q "<!-- E2E_METRICS_START -->" README.md; then
+          sed -i '/<!-- E2E_METRICS_START -->/,/<!-- E2E_METRICS_END -->/{
+            /<!-- E2E_METRICS_START -->/!{
+              /<!-- E2E_METRICS_END -->/!d
+            }
+          }' README.md
+          sed -i '/<!-- E2E_METRICS_START -->/r /tmp/metrics_table.md' README.md
+          echo "[+] README.md updated with latest metrics"
+        else
+          echo "[!] No E2E metrics section found in README.md"
+          echo "Add <!-- E2E_METRICS_START --> and <!-- E2E_METRICS_END --> markers"
+        fi
+
+    - name: Commit changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add README.md
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "Update E2E metrics table [skip ci]"
+          git push
+        fi
