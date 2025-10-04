@@ -8,7 +8,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="unstable-singularity-detector",
-    version="1.3.1",
+    version="1.3.2",
     author="Flamehaven Research",
     author_email="research@flamehaven.ai",
     description="Revolutionary implementation of DeepMind's breakthrough in fluid dynamics singularities",

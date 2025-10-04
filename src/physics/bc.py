@@ -35,3 +35,33 @@ def enforce_bc(
         return u
     else:
         raise ValueError(f"Unknown boundary condition mode: {mode}")
+
+
+def apply_boundary_conditions(
+    u: torch.Tensor,
+    bc_type: str = "dirichlet",
+    bc_value: float = 0.0
+) -> torch.Tensor:
+    """
+    Apply boundary conditions to a 3D tensor.
+
+    Args:
+        u: 3D tensor (X, Y, Z)
+        bc_type: "dirichlet" or "neumann"
+        bc_value: Value to set on boundaries
+
+    Returns:
+        Tensor with boundary conditions applied
+    """
+    u = u.clone()
+
+    if bc_type == "dirichlet":
+        # Set all boundaries to bc_value
+        u[0, :, :] = bc_value
+        u[-1, :, :] = bc_value
+        u[:, 0, :] = bc_value
+        u[:, -1, :] = bc_value
+        u[:, :, 0] = bc_value
+        u[:, :, -1] = bc_value
+
+    return u
